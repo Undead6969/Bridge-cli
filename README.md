@@ -26,6 +26,13 @@ Generate a QR and 6-digit pairing code:
 bridge connect
 ```
 
+If you host the web app on Vercel, point the CLI at it so the QR lands on your real app:
+
+```bash
+export BRIDGE_APP_URL="https://your-bridge-app.vercel.app"
+bridge connect
+```
+
 Log in with a code manually:
 
 ```bash
@@ -42,6 +49,29 @@ Open a terminal session:
 
 ```bash
 bridge terminal --machine <machine-id> --cwd "$PWD"
+```
+
+## Vercel
+
+Install the Vercel CLI:
+
+```bash
+pnpm add -g vercel@latest
+```
+
+Deploy the web app:
+
+```bash
+cd packages/app-web
+vercel
+```
+
+Recommended environment variables:
+
+```bash
+NEXT_PUBLIC_BRIDGE_SERVER_URL=https://your-bridge-server.example.com
+NEXT_PUBLIC_BRIDGE_APP_URL=https://your-bridge-app.vercel.app
+BRIDGE_APP_URL=https://your-bridge-app.vercel.app
 ```
 
 ## Packages

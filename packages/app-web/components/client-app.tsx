@@ -1,7 +1,7 @@
 "use client";
 
 import type { MachineRecord, SessionRecord } from "@bridge/protocol";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Dashboard } from "./dashboard";
 
@@ -37,6 +37,19 @@ export function ClientApp({
   const [exchangeCode, setExchangeCode] = useState("");
   const [error, setError] = useState("");
   const [pairingUrl, setPairingUrl] = useState("");
+  const [isPairing, setIsPairing] = useState(false);
+  const [pairingMessage, setPairingMessage] = useState("Scan the QR or type the 6-digit code.");
+
+  const hostedAppOrigin = useMemo(() => {
+    const publicUrl = process.env.NEXT_PUBLIC_BRIDGE_APP_URL;
+    if (publicUrl) {
+      return publicUrl.replace(/\/$/, "");
+    }
+    if (typeof window === "undefined") {
+      return "http://127.0.0.1:3000";
+    }
+    return window.location.origin;
+  }, []);
 
   useEffect(() => {
     const stored = window.localStorage.getItem(tokenKey);
@@ -52,10 +65,46 @@ export function ClientApp({
   }, []);
 
   useEffect(() => {
+    if (!exchangeCode || token || isPairing) {
+      return;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    if (!params.get("pairCode")) {
+      return;
+    }
+
+    const pairFromLink = async () => {
+      setIsPairing(true);
+      setPairingMessage("Pairing browser from the link...");
+      try {
+        const payload = await fetchJson<{ token: string }>("/auth/pairings/exchange", undefined, {
+          method: "POST",
+          body: JSON.stringify({ code: exchangeCode, label: "web-client" })
+        });
+        setToken(payload.token);
+        setError("");
+        setPairingMessage("Browser paired. You can toss the QR confetti now.");
+        params.delete("pairCode");
+        const nextUrl = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
+        window.history.replaceState({}, "", nextUrl);
+      } catch (exchangeError) {
+        setError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code");
+        setPairingMessage("That pairing link expired or got used already.");
+      } finally {
+        setIsPairing(false);
+      }
+    };
+
+    void pairFromLink();
+  }, [exchangeCode, isPairing, token]);
+
+  useEffect(() => {
     if (!token) {
       return;
     }
     window.localStorage.setItem(tokenKey, token);
+    setPairingMessage("Browser paired and ready.");
     const load = async () => {
       try {
         setMachines(await fetchJson<MachineRecord[]>("/machines", token));
@@ -73,57 +122,94 @@ export function ClientApp({
       body: JSON.stringify({ label: "web" })
     });
     setPairingCode(payload.code);
-    setPairingUrl(`${window.location.origin}/?pairCode=${payload.code}`);
+    setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}`);
     setError("");
+    setPairingMessage("Scan the QR or type the code below.");
   };
 
   const exchangePairing = async () => {
     try {
+      setIsPairing(true);
       const payload = await fetchJson<{ token: string }>("/auth/pairings/exchange", undefined, {
         method: "POST",
         body: JSON.stringify({ code: exchangeCode, label: "web-client" })
       });
       setToken(payload.token);
       setError("");
+      setPairingMessage("Browser paired and ready.");
     } catch (exchangeError) {
       setError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code");
+      setPairingMessage("That code did not work. Tiny betrayal, but fixable.");
+    } finally {
+      setIsPairing(false);
     }
   };
 
   return (
     <div className="shell">
-      <section className="panel">
-        <h2>Pair This Browser</h2>
-        <p className="muted">
-          Use a 6-digit code instead of relying only on QR. Generate a code anywhere,
-          then exchange it here once and this browser stays paired.
-        </p>
-        <div className="launcher">
-          <button className="chip" onClick={requestPairing} type="button">
-            Generate Pairing Code
-          </button>
-        </div>
-        {pairingCode ? (
-          <div className="panel">
-            <div style={{ display: "flex", justifyContent: "center", padding: "0.75rem 0" }}>
-              <QRCodeSVG value={pairingUrl || pairingCode} size={192} />
+      <section className="hero hero-grid">
+        <div className="hero-copy">
+          <span className="badge">Remote CLI / Web-first / Phone-ready</span>
+          <h1>Bridge opens your machine from the command line to the browser in one scan.</h1>
+          <p className="muted hero-text">
+            Run <code>bridge</code>, scan the QR, and jump straight into your machine dashboard.
+            The numeric code sits below the QR for moments when cameras decide to become performance artists.
+          </p>
+          <div className="stats">
+            <div className="stat-card">
+              <strong>{machines.length}</strong>
+              <span className="muted">machines visible</span>
             </div>
-            <p className="muted" style={{ textAlign: "center" }}>Code: {pairingCode}</p>
+            <div className="stat-card">
+              <strong>{sessions.length}</strong>
+              <span className="muted">sessions live</span>
+            </div>
+            <div className="stat-card">
+              <strong>{token ? "paired" : "awaiting link"}</strong>
+              <span className="muted">browser state</span>
+            </div>
           </div>
-        ) : null}
-        <div className="launcher">
+        </div>
+
+        <div className="pair-card">
+          <div className="pair-card-header">
+            <h2>Pair This Browser</h2>
+            <span className="status-pill">{token ? "Connected" : "Ready to pair"}</span>
+          </div>
+          <p className="muted">{pairingMessage}</p>
+          <div className="launcher">
+            <button className="cta-button" onClick={requestPairing} type="button">
+              Generate Pairing Code
+            </button>
+          </div>
+          {pairingCode ? (
+            <div className="qr-shell">
+              <div className="qr-card">
+                <QRCodeSVG value={pairingUrl || pairingCode} size={192} />
+              </div>
+              <div className="code-strip">
+                <span className="code-label">Code</span>
+                <strong>{pairingCode}</strong>
+              </div>
+            </div>
+          ) : (
+            <div className="qr-shell qr-empty">
+              <div className="qr-placeholder">QR appears here after you ask nicely.</div>
+            </div>
+          )}
+          <div className="launcher pair-controls">
           <input
-            className="chip"
+            className="chip code-input"
             value={exchangeCode}
             onChange={(event) => setExchangeCode(event.target.value)}
             placeholder="Enter 6-digit code"
           />
-          <button className="chip" onClick={exchangePairing} type="button">
-            Connect
+          <button className="chip action-button" onClick={exchangePairing} type="button" disabled={isPairing}>
+            {isPairing ? "Connecting..." : "Connect"}
           </button>
         </div>
-        {token ? <p className="muted">Browser paired.</p> : null}
-        {error ? <p className="muted">{error}</p> : null}
+          {error ? <p className="muted danger-text">{error}</p> : null}
+        </div>
       </section>
       <Dashboard machines={machines} sessions={sessions} />
     </div>
