@@ -1,5 +1,9 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
+import { spawn, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { Command } from "commander";
 import localtunnel from "localtunnel";
 import qrcode from "qrcode-terminal";
@@ -10,8 +14,104 @@ const appUrl = process.env.BRIDGE_APP_URL ?? "https://app-web-sand.vercel.app";
 const auth = readAuthToken();
 const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
+const currentFile = fileURLToPath(import.meta.url);
+const bridgeRoot = resolve(dirname(currentFile), "..", "..", "..");
 
 program.name("bridge").description("Remote scripting and session-control CLI");
+
+type ManagedService = {
+  name: "server" | "daemon";
+  healthUrl: string;
+  child?: ChildProcess;
+  started: boolean;
+};
+
+function logServiceOutput(name: string, child: ChildProcess): void {
+  child.stdout?.on("data", (chunk) => {
+    process.stdout.write(`[${name}] ${chunk.toString()}`);
+  });
+  child.stderr?.on("data", (chunk) => {
+    process.stderr.write(`[${name}] ${chunk.toString()}`);
+  });
+}
+
+async function isHealthy(url: string): Promise<boolean> {
+  try {
+    const response = await fetch(url);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForHealthy(url: string, timeoutMs = 15_000): Promise<void> {
+  const startedAt = Date.now();
+  while (!(await isHealthy(url))) {
+    if (Date.now() - startedAt > timeoutMs) {
+      throw new Error(`Timed out waiting for ${url}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+}
+
+function spawnWorkspaceCommand(name: "server" | "daemon"): ChildProcess {
+  const scriptPath =
+    name === "server"
+      ? resolve(bridgeRoot, "packages", "server", "dist", "index.js")
+      : resolve(bridgeRoot, "packages", "daemon-cli", "dist", "index.js");
+
+  if (existsSync(scriptPath)) {
+    const child = spawn(process.execPath, [scriptPath], {
+      cwd: bridgeRoot,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"]
+    });
+    logServiceOutput(name, child);
+    return child;
+  }
+
+  const filter = name === "server" ? "@bridge/server" : "bridge-daemon";
+  const child = spawn("corepack", ["pnpm", "--filter", filter, "dev"], {
+    cwd: bridgeRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  logServiceOutput(name, child);
+  return child;
+}
+
+async function ensureLocalServices(options?: {
+  startServer?: boolean;
+  startDaemon?: boolean;
+}): Promise<ManagedService[]> {
+  const services: ManagedService[] = [
+    {
+      name: "server",
+      healthUrl: `${baseUrl}/health`,
+      started: false
+    },
+    {
+      name: "daemon",
+      healthUrl: "http://127.0.0.1:8790/machine/capabilities",
+      started: false
+    }
+  ];
+
+  for (const service of services) {
+    const shouldStart = service.name === "server" ? options?.startServer !== false : options?.startDaemon !== false;
+    if (await isHealthy(service.healthUrl)) {
+      continue;
+    }
+    if (!shouldStart) {
+      continue;
+    }
+    service.child = spawnWorkspaceCommand(service.name);
+    service.started = true;
+    await waitForHealthy(service.healthUrl);
+  }
+
+  return services;
+}
 
 function isLoopbackUrl(url: string): boolean {
   const hostname = new URL(url).hostname;
@@ -80,6 +180,33 @@ async function printPairing(label: string, options?: { useTunnel?: boolean; serv
   }
 }
 
+async function hostMode(options?: {
+  label?: string;
+  useTunnel?: boolean;
+  serverUrl?: string;
+  subdomain?: string;
+  startServer?: boolean;
+  startDaemon?: boolean;
+}): Promise<void> {
+  const services = await ensureLocalServices({
+    startServer: options?.startServer,
+    startDaemon: options?.startDaemon
+  });
+
+  const started = services.filter((service) => service.started).map((service) => service.name);
+  if (started.length > 0) {
+    console.log(`Started: ${started.join(", ")}`);
+  } else {
+    console.log("Local server and daemon were already running.");
+  }
+
+  await printPairing(options?.label ?? "bridge", {
+    useTunnel: options?.useTunnel,
+    serverUrl: options?.serverUrl,
+    subdomain: options?.subdomain
+  });
+}
+
 const authCommand = program.command("auth").description("Pairing code auth");
 
 authCommand
@@ -124,6 +251,26 @@ program
       useTunnel: options.tunnel,
       serverUrl: options.serverUrl,
       subdomain: options.subdomain
+    });
+  });
+
+program
+  .command("host")
+  .description("Start the local Bridge server and daemon, then print a pairing QR")
+  .option("--label <label>", "Label for the requesting device", "bridge")
+  .option("--no-tunnel", "Do not create a public tunnel for local servers")
+  .option("--server-url <url>", "Explicit public server URL")
+  .option("--subdomain <name>", "Preferred localtunnel subdomain")
+  .option("--no-server", "Do not auto-start the local Bridge server")
+  .option("--no-daemon", "Do not auto-start the local Bridge daemon")
+  .action(async (options) => {
+    await hostMode({
+      label: options.label,
+      useTunnel: options.tunnel,
+      serverUrl: options.serverUrl,
+      subdomain: options.subdomain,
+      startServer: options.server,
+      startDaemon: options.daemon
     });
   });
 
@@ -270,7 +417,7 @@ program
   });
 
 if (process.argv.length <= 2) {
-  await printPairing("bridge", { useTunnel: true });
+  await hostMode({ label: "bridge", useTunnel: true });
 } else {
   await program.parseAsync(process.argv);
 }
