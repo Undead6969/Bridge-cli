@@ -13,6 +13,7 @@
   "dependencies": {
     "@bridge/protocol": "workspace:*",
     "next": "^15.5.6",
+    "qrcode.react": "^4.2.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0"
   },

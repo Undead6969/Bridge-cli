@@ -2,6 +2,7 @@
 
 import type { MachineRecord, SessionRecord } from "@bridge/protocol";
 import { useEffect, useState } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import { Dashboard } from "./dashboard";
 
 const tokenKey = "bridge-auth-token";
@@ -35,11 +36,18 @@ export function ClientApp({
   const [pairingCode, setPairingCode] = useState("");
   const [exchangeCode, setExchangeCode] = useState("");
   const [error, setError] = useState("");
+  const [pairingUrl, setPairingUrl] = useState("");
 
   useEffect(() => {
     const stored = window.localStorage.getItem(tokenKey);
     if (stored) {
       setToken(stored);
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const pairCode = params.get("pairCode");
+    if (pairCode) {
+      setExchangeCode(pairCode);
     }
   }, []);
 
@@ -65,6 +73,7 @@ export function ClientApp({
       body: JSON.stringify({ label: "web" })
     });
     setPairingCode(payload.code);
+    setPairingUrl(`${window.location.origin}/?pairCode=${payload.code}`);
     setError("");
   };
 
@@ -93,8 +102,15 @@ export function ClientApp({
           <button className="chip" onClick={requestPairing} type="button">
             Generate Pairing Code
           </button>
-          {pairingCode ? <span className="chip">Code: {pairingCode}</span> : null}
         </div>
+        {pairingCode ? (
+          <div className="panel">
+            <div style={{ display: "flex", justifyContent: "center", padding: "0.75rem 0" }}>
+              <QRCodeSVG value={pairingUrl || pairingCode} size={192} />
+            </div>
+            <p className="muted" style={{ textAlign: "center" }}>Code: {pairingCode}</p>
+          </div>
+        ) : null}
         <div className="launcher">
           <input
             className="chip"

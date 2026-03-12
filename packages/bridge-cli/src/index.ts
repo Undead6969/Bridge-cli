@@ -1,14 +1,26 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
 import { Command } from "commander";
+import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
 
 const baseUrl = process.env.BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
+const appUrl = process.env.BRIDGE_APP_URL ?? "http://127.0.0.1:3000";
 const auth = readAuthToken();
 const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
 
 program.name("bridge").description("Remote scripting and session-control CLI");
+
+async function printPairing(label: string): Promise<void> {
+  const publicSdk = new BridgeSdk(baseUrl);
+  const pairing = await publicSdk.createPairing(label);
+  const url = new URL(appUrl);
+  url.searchParams.set("pairCode", pairing.code);
+  qrcode.generate(url.toString(), { small: true });
+  console.log(`\nCode: ${pairing.code}`);
+  console.log(`Open: ${url.toString()}\n`);
+}
 
 const authCommand = program.command("auth").description("Pairing code auth");
 
@@ -16,9 +28,7 @@ authCommand
   .command("pair")
   .option("--label <label>", "Label for the requesting device", "bridge")
   .action(async (options) => {
-    const publicSdk = new BridgeSdk(baseUrl);
-    const pairing = await publicSdk.createPairing(options.label);
-    console.log(JSON.stringify(pairing, null, 2));
+    await printPairing(options.label);
   });
 
 authCommand
@@ -36,6 +46,26 @@ authCommand.command("logout").action(() => {
   clearAuthToken();
   console.log(JSON.stringify({ ok: true }, null, 2));
 });
+
+program
+  .command("connect")
+  .description("Generate a QR and 6-digit code for pairing a browser or phone")
+  .option("--label <label>", "Label for the requesting device", "bridge")
+  .action(async (options) => {
+    await printPairing(options.label);
+  });
+
+program
+  .command("login")
+  .description("Log in with a 6-digit pairing code")
+  .requiredOption("--code <code>", "6 digit pairing code")
+  .option("--label <label>", "Label for this device", "bridge-cli")
+  .action(async (options) => {
+    const publicSdk = new BridgeSdk(baseUrl);
+    const token = await publicSdk.exchangePairing(options.code, options.label);
+    writeAuthToken(token);
+    console.log(JSON.stringify(token, null, 2));
+  });
 
 program
   .command("machines")
