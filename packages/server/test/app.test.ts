@@ -154,4 +154,21 @@ describe("server app", () => {
     expect(send).toHaveBeenCalledOnce();
     expect(send.mock.calls[0]?.[0]).toContain("session.start");
   });
+
+  it("responds with cors headers for hosted app origins", async () => {
+    const store = tempStore();
+    const { app } = createApp(store);
+
+    const response = await app.inject({
+      method: "OPTIONS",
+      url: "/auth/pairings/request",
+      headers: {
+        origin: "https://app-web-sand.vercel.app",
+        "access-control-request-method": "POST"
+      }
+    });
+
+    expect(response.statusCode).toBe(204);
+    expect(response.headers["access-control-allow-origin"]).toBe("https://app-web-sand.vercel.app");
+  });
 });

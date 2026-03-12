@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
 import { Command } from "commander";
+import localtunnel from "localtunnel";
 import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
 
@@ -12,14 +13,71 @@ const program = new Command();
 
 program.name("bridge").description("Remote scripting and session-control CLI");
 
-async function printPairing(label: string): Promise<void> {
-  const publicSdk = new BridgeSdk(baseUrl);
+function isLoopbackUrl(url: string): boolean {
+  const hostname = new URL(url).hostname;
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "0.0.0.0";
+}
+
+async function createTunnel(serverUrl: string, subdomain?: string): Promise<{
+  url: string;
+  close: () => void;
+}> {
+  const parsed = new URL(serverUrl);
+  const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
+  const tunnel = await localtunnel({
+    port,
+    subdomain
+  });
+
+  return {
+    url: tunnel.url,
+    close: () => tunnel.close()
+  };
+}
+
+async function resolvePublicServerUrl(options?: { useTunnel?: boolean; serverUrl?: string; subdomain?: string }): Promise<{
+  serverUrl: string;
+  close?: () => void;
+}> {
+  if (options?.serverUrl) {
+    return { serverUrl: options.serverUrl };
+  }
+  if (process.env.BRIDGE_PUBLIC_SERVER_URL) {
+    return { serverUrl: process.env.BRIDGE_PUBLIC_SERVER_URL };
+  }
+  if (!isLoopbackUrl(baseUrl) || options?.useTunnel === false) {
+    return { serverUrl: baseUrl };
+  }
+
+  const tunnel = await createTunnel(baseUrl, options?.subdomain ?? process.env.BRIDGE_TUNNEL_SUBDOMAIN);
+  return {
+    serverUrl: tunnel.url,
+    close: tunnel.close
+  };
+}
+
+async function printPairing(label: string, options?: { useTunnel?: boolean; serverUrl?: string; subdomain?: string }): Promise<void> {
+  const exposure = await resolvePublicServerUrl(options);
+  const publicSdk = new BridgeSdk(exposure.serverUrl);
   const pairing = await publicSdk.createPairing(label);
   const url = new URL(appUrl);
   url.searchParams.set("pairCode", pairing.code);
+  url.searchParams.set("serverUrl", exposure.serverUrl);
   qrcode.generate(url.toString(), { small: true });
   console.log(`\nCode: ${pairing.code}`);
+  console.log(`Server: ${exposure.serverUrl}`);
   console.log(`Open: ${url.toString()}\n`);
+
+  if (exposure.close) {
+    console.log("Tunnel is active. Keep this process running while you use the web app.");
+    const cleanup = () => {
+      exposure.close?.();
+      process.exit(0);
+    };
+    process.on("SIGINT", cleanup);
+    process.on("SIGTERM", cleanup);
+    await new Promise(() => undefined);
+  }
 }
 
 const authCommand = program.command("auth").description("Pairing code auth");
@@ -27,8 +85,15 @@ const authCommand = program.command("auth").description("Pairing code auth");
 authCommand
   .command("pair")
   .option("--label <label>", "Label for the requesting device", "bridge")
+  .option("--no-tunnel", "Do not create a public tunnel for local servers")
+  .option("--server-url <url>", "Explicit public server URL")
+  .option("--subdomain <name>", "Preferred localtunnel subdomain")
   .action(async (options) => {
-    await printPairing(options.label);
+    await printPairing(options.label, {
+      useTunnel: options.tunnel,
+      serverUrl: options.serverUrl,
+      subdomain: options.subdomain
+    });
   });
 
 authCommand
@@ -51,8 +116,15 @@ program
   .command("connect")
   .description("Generate a QR and 6-digit code for pairing a browser or phone")
   .option("--label <label>", "Label for the requesting device", "bridge")
+  .option("--no-tunnel", "Do not create a public tunnel for local servers")
+  .option("--server-url <url>", "Explicit public server URL")
+  .option("--subdomain <name>", "Preferred localtunnel subdomain")
   .action(async (options) => {
-    await printPairing(options.label);
+    await printPairing(options.label, {
+      useTunnel: options.tunnel,
+      serverUrl: options.serverUrl,
+      subdomain: options.subdomain
+    });
   });
 
 program
@@ -65,6 +137,17 @@ program
     const token = await publicSdk.exchangePairing(options.code, options.label);
     writeAuthToken(token);
     console.log(JSON.stringify(token, null, 2));
+  });
+
+program
+  .command("doctor")
+  .description("Check server and daemon reachability")
+  .action(async () => {
+    const checks = await Promise.all([
+      fetch(`${baseUrl}/health`).then((response) => ({ name: "server", ok: response.ok, url: baseUrl })).catch(() => ({ name: "server", ok: false, url: baseUrl })),
+      fetch("http://127.0.0.1:8790/machine/capabilities").then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" })).catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
+    ]);
+    console.log(JSON.stringify(checks, null, 2));
   });
 
 program
@@ -187,7 +270,7 @@ program
   });
 
 if (process.argv.length <= 2) {
-  await printPairing("bridge");
+  await printPairing("bridge", { useTunnel: true });
 } else {
   await program.parseAsync(process.argv);
 }

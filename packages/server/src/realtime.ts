@@ -4,6 +4,7 @@ import { daemonCommandSchema, daemonEventSchema, subscriberCommandSchema, type S
 import type { Server as HttpServer } from "node:http";
 import { parse } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
+import { originAllowed } from "./origin.js";
 import type { BridgeStore } from "./store.js";
 
 export type Connections = {
@@ -35,6 +36,7 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
     const token = authTokenFromUrl(request.url);
     const parsed = parse(request.url ?? "", true);
     const role = parsed.query.role;
+    const origin = typeof request.headers.origin === "string" ? request.headers.origin : undefined;
 
     if (role === "daemon") {
       let machineId = "";
@@ -98,6 +100,11 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
         }
       });
 
+      return;
+    }
+
+    if (!originAllowed(origin)) {
+      socket.close(1008, "origin not allowed");
       return;
     }
 

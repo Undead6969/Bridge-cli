@@ -53,7 +53,7 @@ describe("Dashboard", () => {
       }
     ];
 
-    const html = renderToStaticMarkup(<Dashboard machines={machines} sessions={[]} />);
+    const html = renderToStaticMarkup(<Dashboard machines={machines} sessions={[]} serverBaseUrl="https://bridge.example.com" />);
     expect(html).toContain("laptop");
     expect(html).toContain("Codex: 5.4");
   });

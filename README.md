@@ -33,6 +33,10 @@ export BRIDGE_APP_URL="https://your-bridge-app.vercel.app"
 bridge connect
 ```
 
+If your Bridge server is only running on your laptop, `bridge` and `bridge connect`
+now create a public LocalTunnel URL automatically and embed that server URL into the QR.
+The hosted app stores that server URL locally, so the phone/browser knows where to talk.
+
 Log in with a code manually:
 
 ```bash
@@ -49,6 +53,12 @@ Open a terminal session:
 
 ```bash
 bridge terminal --machine <machine-id> --cwd "$PWD"
+```
+
+Check whether the local server and daemon are reachable:
+
+```bash
+bridge doctor
 ```
 
 ## Vercel
@@ -73,6 +83,16 @@ NEXT_PUBLIC_BRIDGE_SERVER_URL=https://your-bridge-server.example.com
 NEXT_PUBLIC_BRIDGE_APP_URL=https://your-bridge-app.vercel.app
 BRIDGE_APP_URL=https://your-bridge-app.vercel.app
 ```
+
+## Public Server Access
+
+Bridge now supports two modes:
+
+1. Host the server on a public machine or reverse proxy and set `BRIDGE_PUBLIC_SERVER_URL`.
+2. Keep the server local and let `bridge` create a LocalTunnel URL automatically.
+
+WebSocket streaming works through LocalTunnel according to the project README:
+[localtunnel README](https://github.com/localtunnel/localtunnel#readme)
 
 ## Packages
 

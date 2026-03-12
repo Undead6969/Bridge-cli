@@ -1,5 +1,7 @@
 import { machineCapabilitiesSchema, machineRecordSchema, pairingCodeSchema, pairingRequestSchema, powerPolicySchema, sessionRecordSchema, sessionSpecSchema } from "@bridge/protocol";
+import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { originAllowed } from "./origin.js";
 import { attachRealtime, sendSessionStart, sendSessionStop, type Connections } from "./realtime.js";
 import { BridgeStore } from "./store.js";
 
@@ -14,6 +16,14 @@ function bearerToken(headers: Record<string, unknown>): string | undefined {
 export function createApp(store = new BridgeStore()) {
   const app = Fastify({ logger: false });
   let realtime: Connections | null = null;
+
+  void app.register(cors, {
+    origin(origin, callback) {
+      callback(originAllowed(origin) ? null : new Error("Origin not allowed"), true);
+    },
+    methods: ["GET", "POST", "PUT", "OPTIONS"],
+    allowedHeaders: ["authorization", "content-type"]
+  });
 
   app.addHook("onReady", async () => {
     realtime = attachRealtime(app.server, store);

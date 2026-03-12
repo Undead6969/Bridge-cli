@@ -4,9 +4,10 @@ import type { MachineRecord, SessionRecord } from "@bridge/protocol";
 type DashboardProps = {
   machines: MachineRecord[];
   sessions: SessionRecord[];
+  serverBaseUrl: string;
 };
 
-export function Dashboard({ machines, sessions }: DashboardProps) {
+export function Dashboard({ machines, sessions, serverBaseUrl }: DashboardProps) {
   const onlineMachines = machines.filter((machine) => machine.online).length;
 
   return (
@@ -39,6 +40,11 @@ export function Dashboard({ machines, sessions }: DashboardProps) {
           <span className="eyebrow">Sessions</span>
           <strong>{sessions.length}</strong>
           <span className="muted">running or recently active</span>
+        </div>
+        <div className="summary-card">
+          <span className="eyebrow">Bridge Server</span>
+          <strong>{serverBaseUrl ? "linked" : "missing"}</strong>
+          <span className="muted">{serverBaseUrl || "Add a public server URL to pair from the web."}</span>
         </div>
         <div className="summary-card">
           <span className="eyebrow">Wake Policy</span>

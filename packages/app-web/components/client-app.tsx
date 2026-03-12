@@ -6,9 +6,9 @@ import { QRCodeSVG } from "qrcode.react";
 import { Dashboard } from "./dashboard";
 
 const tokenKey = "bridge-auth-token";
+const serverUrlKey = "bridge-server-url";
 
-async function fetchJson<T>(path: string, token?: string, init?: RequestInit): Promise<T> {
-  const base = process.env.NEXT_PUBLIC_BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
+async function fetchJson<T>(base: string, path: string, token?: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
@@ -39,6 +39,7 @@ export function ClientApp({
   const [pairingUrl, setPairingUrl] = useState("");
   const [isPairing, setIsPairing] = useState(false);
   const [pairingMessage, setPairingMessage] = useState("Scan the QR or type the 6-digit code.");
+  const [serverBaseUrl, setServerBaseUrl] = useState(process.env.NEXT_PUBLIC_BRIDGE_SERVER_URL ?? "");
 
   const hostedAppOrigin = useMemo(() => {
     const publicUrl = process.env.NEXT_PUBLIC_BRIDGE_APP_URL;
@@ -52,20 +53,29 @@ export function ClientApp({
   }, []);
 
   useEffect(() => {
+    const storedServerUrl = window.localStorage.getItem(serverUrlKey);
     const stored = window.localStorage.getItem(tokenKey);
     if (stored) {
       setToken(stored);
     }
+    if (storedServerUrl) {
+      setServerBaseUrl(storedServerUrl);
+    }
 
     const params = new URLSearchParams(window.location.search);
     const pairCode = params.get("pairCode");
+    const serverUrl = params.get("serverUrl");
     if (pairCode) {
       setExchangeCode(pairCode);
+    }
+    if (serverUrl) {
+      setServerBaseUrl(serverUrl);
+      window.localStorage.setItem(serverUrlKey, serverUrl);
     }
   }, []);
 
   useEffect(() => {
-    if (!exchangeCode || token || isPairing) {
+    if (!exchangeCode || token || isPairing || !serverBaseUrl) {
       return;
     }
 
@@ -78,7 +88,7 @@ export function ClientApp({
       setIsPairing(true);
       setPairingMessage("Pairing browser from the link...");
       try {
-        const payload = await fetchJson<{ token: string }>("/auth/pairings/exchange", undefined, {
+        const payload = await fetchJson<{ token: string }>(serverBaseUrl, "/auth/pairings/exchange", undefined, {
           method: "POST",
           body: JSON.stringify({ code: exchangeCode, label: "web-client" })
         });
@@ -86,6 +96,7 @@ export function ClientApp({
         setError("");
         setPairingMessage("Browser paired. You can toss the QR confetti now.");
         params.delete("pairCode");
+        params.delete("serverUrl");
         const nextUrl = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
         window.history.replaceState({}, "", nextUrl);
       } catch (exchangeError) {
@@ -97,40 +108,48 @@ export function ClientApp({
     };
 
     void pairFromLink();
-  }, [exchangeCode, isPairing, token]);
+  }, [exchangeCode, isPairing, serverBaseUrl, token]);
 
   useEffect(() => {
-    if (!token) {
+    if (!token || !serverBaseUrl) {
       return;
     }
     window.localStorage.setItem(tokenKey, token);
+    window.localStorage.setItem(serverUrlKey, serverBaseUrl);
     setPairingMessage("Browser paired and ready.");
     const load = async () => {
       try {
-        setMachines(await fetchJson<MachineRecord[]>("/machines", token));
-        setSessions(await fetchJson<SessionRecord[]>("/sessions", token));
+        setMachines(await fetchJson<MachineRecord[]>(serverBaseUrl, "/machines", token));
+        setSessions(await fetchJson<SessionRecord[]>(serverBaseUrl, "/sessions", token));
       } catch (loadError) {
         setError(loadError instanceof Error ? loadError.message : "Failed to load data");
       }
     };
     void load();
-  }, [token]);
+  }, [serverBaseUrl, token]);
 
   const requestPairing = async () => {
-    const payload = await fetchJson<{ code: string; expiresAt: number }>("/auth/pairings/request", undefined, {
+    if (!serverBaseUrl) {
+      setError("Enter a Bridge server URL first.");
+      return;
+    }
+    const payload = await fetchJson<{ code: string; expiresAt: number }>(serverBaseUrl, "/auth/pairings/request", undefined, {
       method: "POST",
       body: JSON.stringify({ label: "web" })
     });
     setPairingCode(payload.code);
-    setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}`);
+    setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}&serverUrl=${serverBaseUrl}`);
     setError("");
     setPairingMessage("Scan the QR or type the code below.");
   };
 
   const exchangePairing = async () => {
     try {
+      if (!serverBaseUrl) {
+        throw new Error("Enter a Bridge server URL first.");
+      }
       setIsPairing(true);
-      const payload = await fetchJson<{ token: string }>("/auth/pairings/exchange", undefined, {
+      const payload = await fetchJson<{ token: string }>(serverBaseUrl, "/auth/pairings/exchange", undefined, {
         method: "POST",
         body: JSON.stringify({ code: exchangeCode, label: "web-client" })
       });
@@ -182,6 +201,14 @@ export function ClientApp({
               Generate Pairing Code
             </button>
           </div>
+          <div className="launcher pair-controls">
+            <input
+              className="chip code-input"
+              value={serverBaseUrl}
+              onChange={(event) => setServerBaseUrl(event.target.value)}
+              placeholder="https://your-bridge-server.example.com"
+            />
+          </div>
           {pairingCode ? (
             <div className="qr-shell">
               <div className="qr-card">
@@ -198,20 +225,20 @@ export function ClientApp({
             </div>
           )}
           <div className="launcher pair-controls">
-          <input
-            className="chip code-input"
-            value={exchangeCode}
-            onChange={(event) => setExchangeCode(event.target.value)}
-            placeholder="Enter 6-digit code"
-          />
-          <button className="chip action-button" onClick={exchangePairing} type="button" disabled={isPairing}>
-            {isPairing ? "Connecting..." : "Connect"}
-          </button>
-        </div>
+            <input
+              className="chip code-input"
+              value={exchangeCode}
+              onChange={(event) => setExchangeCode(event.target.value)}
+              placeholder="Enter 6-digit code"
+            />
+            <button className="chip action-button" onClick={exchangePairing} type="button" disabled={isPairing}>
+              {isPairing ? "Connecting..." : "Connect"}
+            </button>
+          </div>
           {error ? <p className="muted danger-text">{error}</p> : null}
         </div>
       </section>
-      <Dashboard machines={machines} sessions={sessions} />
+      <Dashboard machines={machines} sessions={sessions} serverBaseUrl={serverBaseUrl} />
     </div>
   );
 }
