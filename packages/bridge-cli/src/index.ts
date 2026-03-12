@@ -291,10 +291,26 @@ program
   .description("Check server and daemon reachability")
   .action(async () => {
     const checks = await Promise.all([
-      fetch(`${baseUrl}/health`).then((response) => ({ name: "server", ok: response.ok, url: baseUrl })).catch(() => ({ name: "server", ok: false, url: baseUrl })),
-      fetch("http://127.0.0.1:8790/machine/capabilities").then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" })).catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
+      fetch(`${baseUrl}/health`)
+        .then((response) => ({ name: "server", ok: response.ok, url: baseUrl }))
+        .catch(() => ({ name: "server", ok: false, url: baseUrl })),
+      fetch("http://127.0.0.1:8790/machine/capabilities")
+        .then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" }))
+        .catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
     ]);
-    console.log(JSON.stringify(checks, null, 2));
+    console.log(
+      JSON.stringify(
+        {
+          checks,
+          hostedApp: appUrl,
+          publicServerUrl: process.env.BRIDGE_PUBLIC_SERVER_URL ?? null,
+          tunnelMode: process.env.BRIDGE_PUBLIC_SERVER_URL ? "disabled (explicit public server)" : isLoopbackUrl(baseUrl) ? "available on demand" : "not needed",
+          authLabel: auth?.label ?? null
+        },
+        null,
+        2
+      )
+    );
   });
 
 program

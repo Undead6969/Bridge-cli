@@ -95,12 +95,17 @@ export const sessionRecordSchema = z.object({
   machineId: z.string(),
   runtime: runtimeKindSchema,
   title: z.string(),
-  status: z.enum(["starting", "running", "stopped", "errored"]),
+  status: z.enum(["starting", "running", "waiting", "blocked", "approval-needed", "completed", "stopped", "errored", "offline"]),
+  attention: z.enum(["idle", "activity", "needs-review", "urgent"]).default("idle"),
+  owner: z.enum(["local", "remote", "shared", "unknown"]).default("unknown"),
   cwd: z.string(),
   agent: agentKindSchema.optional(),
   shell: z.string().optional(),
   terminalBackend: z.enum(["node-pty", "python-pty"]).optional(),
   startedBy: startedBySchema,
+  lastEventAt: z.number().optional(),
+  lastViewedAt: z.number().optional(),
+  unreadCount: z.number().int().nonnegative().default(0),
   createdAt: z.number(),
   updatedAt: z.number()
 });
@@ -109,12 +114,31 @@ export type SessionRecord = z.infer<typeof sessionRecordSchema>;
 export const sessionStreamEventSchema = z.object({
   id: z.string(),
   sessionId: z.string(),
-  kind: z.enum(["stdout", "stderr", "status", "approval", "input", "system"]),
+  kind: z.enum(["stdout", "stderr", "status", "approval", "input", "system", "ready", "blocked", "completed"]),
   data: z.string(),
   at: z.number(),
   meta: z.record(z.string(), z.unknown()).optional()
 });
 export type SessionStreamEvent = z.infer<typeof sessionStreamEventSchema>;
+
+export const inboxItemSchema = z.object({
+  id: z.string(),
+  machineId: z.string().optional(),
+  sessionId: z.string().optional(),
+  title: z.string(),
+  body: z.string(),
+  level: z.enum(["info", "success", "warning", "critical"]),
+  category: z.enum(["session-ready", "approval-required", "session-blocked", "machine-offline", "machine-online", "server"]),
+  readAt: z.number().optional(),
+  createdAt: z.number(),
+  link: z
+    .object({
+      type: z.enum(["session", "machine", "settings"]),
+      targetId: z.string().optional()
+    })
+    .optional()
+});
+export type InboxItem = z.infer<typeof inboxItemSchema>;
 
 export const machineRecordSchema = z.object({
   machineId: z.string(),
@@ -122,6 +146,7 @@ export const machineRecordSchema = z.object({
   capabilities: machineCapabilitiesSchema,
   powerPolicy: powerPolicySchema,
   online: z.boolean(),
+  daemonConnected: z.boolean().optional(),
   updatedAt: z.number()
 });
 export type MachineRecord = z.infer<typeof machineRecordSchema>;
@@ -204,6 +229,10 @@ export const daemonEventSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("session.started"),
+    session: sessionRecordSchema
+  }),
+  z.object({
+    type: z.literal("session.updated"),
     session: sessionRecordSchema
   }),
   z.object({

@@ -1,12 +1,13 @@
 "use client";
 
-import type { MachineRecord, SessionRecord } from "@bridge/protocol";
-import { useEffect, useMemo, useState } from "react";
+import type { InboxItem, MachineRecord, SessionRecord, SessionStreamEvent } from "@bridge/protocol";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import { Dashboard } from "./dashboard";
 
 const tokenKey = "bridge-auth-token";
 const serverUrlKey = "bridge-server-url";
+const notificationsKey = "bridge-notifications-enabled";
 
 async function fetchJson<T>(base: string, path: string, token?: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, {
@@ -23,6 +24,15 @@ async function fetchJson<T>(base: string, path: string, token?: string, init?: R
   return (await response.json()) as T;
 }
 
+function websocketUrl(baseUrl: string, token: string): string {
+  const url = new URL(baseUrl);
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.pathname = "/ws";
+  url.searchParams.set("role", "subscriber");
+  url.searchParams.set("token", token);
+  return url.toString();
+}
+
 export function ClientApp({
   fallbackMachines,
   fallbackSessions
@@ -33,6 +43,7 @@ export function ClientApp({
   const [token, setToken] = useState<string | null>(null);
   const [machines, setMachines] = useState<MachineRecord[]>(fallbackMachines);
   const [sessions, setSessions] = useState<SessionRecord[]>(fallbackSessions);
+  const [inbox, setInbox] = useState<InboxItem[]>([]);
   const [pairingCode, setPairingCode] = useState("");
   const [exchangeCode, setExchangeCode] = useState("");
   const [error, setError] = useState("");
@@ -40,6 +51,15 @@ export function ClientApp({
   const [isPairing, setIsPairing] = useState(false);
   const [pairingMessage, setPairingMessage] = useState("Scan the QR or type the 6-digit code.");
   const [serverBaseUrl, setServerBaseUrl] = useState(process.env.NEXT_PUBLIC_BRIDGE_SERVER_URL ?? "");
+  const [activeTab, setActiveTab] = useState<"home" | "sessions" | "inbox" | "settings">("home");
+  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(fallbackMachines[0]?.machineId ?? null);
+  const [activeSessionId, setActiveSessionId] = useState<string | null>(fallbackSessions[0]?.id ?? null);
+  const [sessionEvents, setSessionEvents] = useState<SessionStreamEvent[]>([]);
+  const [composer, setComposer] = useState("");
+  const [notificationsEnabled, setNotificationsEnabled] = useState(false);
+  const [reconnectHint, setReconnectHint] = useState("");
+  const socketRef = useRef<WebSocket | null>(null);
+  const seenInboxIds = useRef<Set<string>>(new Set());
 
   const hostedAppOrigin = useMemo(() => {
     const publicUrl = process.env.NEXT_PUBLIC_BRIDGE_APP_URL;
@@ -52,15 +72,22 @@ export function ClientApp({
     return window.location.origin;
   }, []);
 
+  const activeSession = useMemo(
+    () => sessions.find((session) => session.id === activeSessionId) ?? null,
+    [activeSessionId, sessions]
+  );
+
   useEffect(() => {
     const storedServerUrl = window.localStorage.getItem(serverUrlKey);
-    const stored = window.localStorage.getItem(tokenKey);
-    if (stored) {
-      setToken(stored);
+    const storedToken = window.localStorage.getItem(tokenKey);
+    const storedNotifications = window.localStorage.getItem(notificationsKey);
+    if (storedToken) {
+      setToken(storedToken);
     }
     if (storedServerUrl) {
       setServerBaseUrl(storedServerUrl);
     }
+    setNotificationsEnabled(storedNotifications === "true");
 
     const params = new URLSearchParams(window.location.search);
     const pairCode = params.get("pairCode");
@@ -94,7 +121,7 @@ export function ClientApp({
         });
         setToken(payload.token);
         setError("");
-        setPairingMessage("Browser paired. You can toss the QR confetti now.");
+        setPairingMessage("Browser paired. You are now legally allowed to feel powerful.");
         params.delete("pairCode");
         params.delete("serverUrl");
         const nextUrl = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
@@ -116,17 +143,142 @@ export function ClientApp({
     }
     window.localStorage.setItem(tokenKey, token);
     window.localStorage.setItem(serverUrlKey, serverBaseUrl);
-    setPairingMessage("Browser paired and ready.");
+
+    let cancelled = false;
     const load = async () => {
       try {
-        setMachines(await fetchJson<MachineRecord[]>(serverBaseUrl, "/machines", token));
-        setSessions(await fetchJson<SessionRecord[]>(serverBaseUrl, "/sessions", token));
+        const [machineData, sessionData, inboxData] = await Promise.all([
+          fetchJson<MachineRecord[]>(serverBaseUrl, "/machines", token),
+          fetchJson<SessionRecord[]>(serverBaseUrl, "/sessions", token),
+          fetchJson<InboxItem[]>(serverBaseUrl, "/inbox", token)
+        ]);
+        if (cancelled) {
+          return;
+        }
+        setMachines(machineData);
+        setSessions(sessionData);
+        setInbox(inboxData);
+        setSelectedMachineId((current) => current ?? machineData[0]?.machineId ?? null);
+        setActiveSessionId((current) => current ?? sessionData[0]?.id ?? null);
       } catch (loadError) {
-        setError(loadError instanceof Error ? loadError.message : "Failed to load data");
+        if (!cancelled) {
+          setError(loadError instanceof Error ? loadError.message : "Failed to load data");
+        }
       }
     };
+
     void load();
+    const timer = window.setInterval(() => {
+      void load();
+    }, 10_000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
   }, [serverBaseUrl, token]);
+
+  useEffect(() => {
+    window.localStorage.setItem(notificationsKey, notificationsEnabled ? "true" : "false");
+  }, [notificationsEnabled]);
+
+  useEffect(() => {
+    if (!notificationsEnabled || typeof window === "undefined" || Notification.permission !== "granted") {
+      return;
+    }
+    for (const item of inbox) {
+      if (item.readAt || seenInboxIds.current.has(item.id)) {
+        continue;
+      }
+      seenInboxIds.current.add(item.id);
+      new Notification(item.title, { body: item.body });
+    }
+  }, [inbox, notificationsEnabled]);
+
+  useEffect(() => {
+    if (!token || !serverBaseUrl || !activeSessionId) {
+      socketRef.current?.close();
+      socketRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+    const loadEvents = async () => {
+      try {
+        const events = await fetchJson<SessionStreamEvent[]>(serverBaseUrl, `/sessions/${activeSessionId}/events`, token);
+        if (!cancelled) {
+          setSessionEvents(events);
+          await fetchJson<SessionRecord>(serverBaseUrl, `/sessions/${activeSessionId}/view`, token, { method: "POST" });
+          setSessions((current) =>
+            current.map((session) => (session.id === activeSessionId ? { ...session, unreadCount: 0, lastViewedAt: Date.now(), attention: "idle" } : session))
+          );
+        }
+      } catch (loadError) {
+        if (!cancelled) {
+          setReconnectHint(loadError instanceof Error ? loadError.message : "Reconnect failed");
+        }
+      }
+    };
+
+    void loadEvents();
+
+    const socket = new window.WebSocket(websocketUrl(serverBaseUrl, token));
+    socketRef.current = socket;
+    socket.addEventListener("open", () => {
+      socket.send(JSON.stringify({ type: "subscribe", sessionId: activeSessionId }));
+      setReconnectHint("");
+      void fetchJson<SessionRecord>(serverBaseUrl, `/sessions/${activeSessionId}/owner`, token, {
+        method: "POST",
+        body: JSON.stringify({ owner: "remote" })
+      }).catch(() => undefined);
+    });
+    socket.addEventListener("message", (message) => {
+      const payload = JSON.parse(message.data as string) as
+        | { type: "session.snapshot"; session: SessionRecord | null; events: SessionStreamEvent[] }
+        | { type: "session.event"; event: SessionStreamEvent }
+        | { type: "error"; message: string };
+      if (payload.type === "session.snapshot") {
+        setSessionEvents(payload.events);
+        if (payload.session) {
+          const nextSession = payload.session;
+          setSessions((current) => current.map((session) => (session.id === nextSession.id ? nextSession : session)));
+        }
+        return;
+      }
+      if (payload.type === "session.event") {
+        setSessionEvents((current) => [...current, payload.event].slice(-300));
+        setSessions((current) =>
+          current.map((session) =>
+            session.id === payload.event.sessionId
+              ? {
+                  ...session,
+                  lastEventAt: payload.event.at,
+                  unreadCount: session.id === activeSessionId ? 0 : session.unreadCount + 1,
+                  attention:
+                    payload.event.kind === "approval" || payload.event.kind === "blocked"
+                      ? "urgent"
+                      : payload.event.kind === "ready" || payload.event.kind === "completed"
+                        ? "needs-review"
+                        : "activity"
+                }
+              : session
+          )
+        );
+        return;
+      }
+      setReconnectHint(payload.message);
+    });
+    socket.addEventListener("close", () => {
+      if (!cancelled) {
+        setReconnectHint("Realtime feed disconnected. Polling still has your back.");
+      }
+    });
+
+    return () => {
+      cancelled = true;
+      socket.close();
+      socketRef.current = null;
+    };
+  }, [activeSessionId, serverBaseUrl, token]);
 
   const requestPairing = async () => {
     if (!serverBaseUrl) {
@@ -164,15 +316,81 @@ export function ClientApp({
     }
   };
 
+  const launchSession = async (machineId: string, target: "codex" | "claude" | "gemini" | "terminal") => {
+    if (!token) {
+      setError("Pair this browser first.");
+      return;
+    }
+    const machine = machines.find((item) => item.machineId === machineId);
+    if (!machine) {
+      return;
+    }
+    const payload =
+      target === "terminal"
+        ? { runtime: "terminal-session", cwd: process.env.NEXT_PUBLIC_BRIDGE_DEFAULT_CWD ?? "/", startedBy: "web", shell: machine.capabilities.terminal.shellPath }
+        : { runtime: "agent-session", agent: target, cwd: process.env.NEXT_PUBLIC_BRIDGE_DEFAULT_CWD ?? "/", startedBy: "web" };
+    const created = await fetchJson<SessionRecord>(serverBaseUrl, `/machines/${machineId}/sessions`, token, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+    setSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
+    setActiveSessionId(created.id);
+    setActiveTab("sessions");
+  };
+
+  const sendInput = () => {
+    if (!composer.trim() || !activeSessionId || !socketRef.current || socketRef.current.readyState !== window.WebSocket.OPEN) {
+      return;
+    }
+    socketRef.current.send(JSON.stringify({ type: "input", sessionId: activeSessionId, data: `${composer}\n` }));
+    setComposer("");
+  };
+
+  const updatePower = async (machineId: string, mode: MachineRecord["powerPolicy"]["mode"]) => {
+    if (!token) {
+      return;
+    }
+    const machine = machines.find((item) => item.machineId === machineId);
+    if (!machine) {
+      return;
+    }
+    const updated = await fetchJson<MachineRecord>(serverBaseUrl, `/machines/${machineId}/power-policy`, token, {
+      method: "PUT",
+      body: JSON.stringify({
+        ...machine.powerPolicy,
+        mode
+      })
+    });
+    setMachines((current) => current.map((item) => (item.machineId === machineId ? updated : item)));
+  };
+
+  const markInboxRead = async (id: string) => {
+    if (!token) {
+      return;
+    }
+    await fetchJson<InboxItem>(serverBaseUrl, `/inbox/${id}/read`, token, { method: "POST" });
+    setInbox((current) => current.map((item) => (item.id === id ? { ...item, readAt: Date.now() } : item)));
+  };
+
+  const toggleNotifications = async () => {
+    if (Notification.permission === "default") {
+      const permission = await Notification.requestPermission();
+      if (permission !== "granted") {
+        return;
+      }
+    }
+    setNotificationsEnabled((current) => !current);
+  };
+
   return (
     <div className="shell">
       <section className="hero hero-grid">
         <div className="hero-copy">
-          <span className="badge">Remote CLI / Web-first / Phone-ready</span>
-          <h1>Bridge opens your machine from the command line to the browser in one scan.</h1>
+          <span className="badge">Phone-first / QR + code pairing / runtime switching</span>
+          <h1>Bridge turns your laptop into a remote command deck you can actually drive from your phone.</h1>
           <p className="muted hero-text">
-            Run <code>bridge</code>, scan the QR, and jump straight into your machine dashboard.
-            The numeric code sits below the QR for moments when cameras decide to become performance artists.
+            Pair once, then launch Codex, Claude Code, Gemini CLI, or a raw terminal from the same mobile-shaped app.
+            If the network hiccups, Bridge reconnects instead of entering interpretive dance.
           </p>
           <div className="stats">
             <div className="stat-card">
@@ -184,10 +402,11 @@ export function ClientApp({
               <span className="muted">sessions live</span>
             </div>
             <div className="stat-card">
-              <strong>{token ? "paired" : "awaiting link"}</strong>
-              <span className="muted">browser state</span>
+              <strong>{inbox.filter((item) => !item.readAt).length}</strong>
+              <span className="muted">inbox items</span>
             </div>
           </div>
+          {reconnectHint ? <p className="muted warning-text">{reconnectHint}</p> : null}
         </div>
 
         <div className="pair-card">
@@ -238,7 +457,31 @@ export function ClientApp({
           {error ? <p className="muted danger-text">{error}</p> : null}
         </div>
       </section>
-      <Dashboard machines={machines} sessions={sessions} serverBaseUrl={serverBaseUrl} />
+
+      <Dashboard
+        machines={machines}
+        sessions={sessions}
+        inbox={inbox}
+        serverBaseUrl={serverBaseUrl}
+        activeTab={activeTab}
+        selectedMachineId={selectedMachineId}
+        activeSessionId={activeSessionId}
+        sessionEvents={sessionEvents}
+        composer={composer}
+        notificationsEnabled={notificationsEnabled}
+        onSelectTab={setActiveTab}
+        onSelectMachine={setSelectedMachineId}
+        onSelectSession={(sessionId) => {
+          setActiveSessionId(sessionId);
+          setActiveTab("sessions");
+        }}
+        onComposerChange={setComposer}
+        onSendInput={sendInput}
+        onLaunchSession={launchSession}
+        onPowerChange={updatePower}
+        onMarkInboxRead={markInboxRead}
+        onToggleNotifications={toggleNotifications}
+      />
     </div>
   );
 }

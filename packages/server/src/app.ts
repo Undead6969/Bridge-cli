@@ -1,4 +1,13 @@
-import { machineCapabilitiesSchema, machineRecordSchema, pairingCodeSchema, pairingRequestSchema, powerPolicySchema, sessionRecordSchema, sessionSpecSchema } from "@bridge/protocol";
+import {
+  inboxItemSchema,
+  machineCapabilitiesSchema,
+  machineRecordSchema,
+  pairingCodeSchema,
+  pairingRequestSchema,
+  powerPolicySchema,
+  sessionRecordSchema,
+  sessionSpecSchema
+} from "@bridge/protocol";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { originAllowed } from "./origin.js";
@@ -100,6 +109,13 @@ export function createApp(store = new BridgeStore()) {
 
   app.get("/sessions", async () => store.listSessions());
 
+  app.get("/inbox", async () => store.listInbox());
+
+  app.post("/inbox/:inboxItemId/read", async (request) => {
+    const { inboxItemId } = request.params as { inboxItemId: string };
+    return store.markInboxItemRead(inboxItemId);
+  });
+
   app.get("/sessions/:sessionId/events", async (request, reply) => {
     const { sessionId } = request.params as { sessionId: string };
     const session = store.getSession(sessionId);
@@ -109,6 +125,31 @@ export function createApp(store = new BridgeStore()) {
     }
     const after = (request.query as { after?: string }).after;
     return store.getSessionEvents(sessionId, after);
+  });
+
+  app.post("/sessions/:sessionId/view", async (request, reply) => {
+    const { sessionId } = request.params as { sessionId: string };
+    const session = store.getSession(sessionId);
+    if (!session) {
+      reply.code(404);
+      return { message: "Session not found" };
+    }
+    return store.markSessionViewed(sessionId);
+  });
+
+  app.post("/sessions/:sessionId/owner", async (request, reply) => {
+    const { sessionId } = request.params as { sessionId: string };
+    const session = store.getSession(sessionId);
+    if (!session) {
+      reply.code(404);
+      return { message: "Session not found" };
+    }
+    const body = request.body as { owner?: "local" | "remote" | "shared" | "unknown" };
+    if (!body.owner) {
+      reply.code(400);
+      return { message: "owner is required" };
+    }
+    return store.updateSessionOwner(sessionId, body.owner);
   });
 
   app.post("/machines/:machineId/sessions", async (request, reply) => {
@@ -145,5 +186,6 @@ export function createApp(store = new BridgeStore()) {
 
 export const schemas = {
   machine: machineRecordSchema,
-  session: sessionRecordSchema
+  session: sessionRecordSchema,
+  inbox: inboxItemSchema
 };

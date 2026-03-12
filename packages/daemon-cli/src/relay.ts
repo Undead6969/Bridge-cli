@@ -31,6 +31,9 @@ export class DaemonRelay {
     this.options.sessions.on("session.started", (session) => {
       this.send({ type: "session.started", session });
     });
+    this.options.sessions.on("session.updated", (session) => {
+      this.send({ type: "session.updated", session });
+    });
     this.options.sessions.on("session.stopped", (sessionId) => {
       this.send({ type: "session.stopped", sessionId });
     });

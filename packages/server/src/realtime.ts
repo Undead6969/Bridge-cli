@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { SessionRecord } from "@bridge/protocol";
-import { daemonCommandSchema, daemonEventSchema, subscriberCommandSchema, type SessionStreamEvent } from "@bridge/protocol";
+import { daemonCommandSchema, daemonEventSchema, subscriberCommandSchema, type SessionRecord, type SessionStreamEvent } from "@bridge/protocol";
 import type { Server as HttpServer } from "node:http";
 import { parse } from "node:url";
 import { WebSocketServer, type WebSocket } from "ws";
@@ -11,6 +10,46 @@ export type Connections = {
   daemons: Map<string, WebSocket>;
   subscribers: Map<string, Set<WebSocket>>;
 };
+
+function createInboxFromEvent(event: SessionStreamEvent, session: SessionRecord | undefined) {
+  if (!session) {
+    return undefined;
+  }
+  if (event.kind === "approval") {
+    return {
+      machineId: session.machineId,
+      sessionId: session.id,
+      title: `${session.title} needs approval`,
+      body: event.data.slice(0, 280),
+      level: "critical" as const,
+      category: "approval-required" as const,
+      link: { type: "session" as const, targetId: session.id }
+    };
+  }
+  if (event.kind === "blocked") {
+    return {
+      machineId: session.machineId,
+      sessionId: session.id,
+      title: `${session.title} is blocked`,
+      body: event.data.slice(0, 280),
+      level: "warning" as const,
+      category: "session-blocked" as const,
+      link: { type: "session" as const, targetId: session.id }
+    };
+  }
+  if (event.kind === "ready" || event.kind === "completed") {
+    return {
+      machineId: session.machineId,
+      sessionId: session.id,
+      title: `${session.title} is ready`,
+      body: event.data.slice(0, 280),
+      level: "success" as const,
+      category: "session-ready" as const,
+      link: { type: "session" as const, targetId: session.id }
+    };
+  }
+  return undefined;
+}
 
 function send(socket: WebSocket, payload: unknown): void {
   if (socket.readyState === socket.OPEN) {
@@ -56,7 +95,8 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
             hostname: event.capabilities.hostname,
             capabilities: event.capabilities,
             powerPolicy: event.powerPolicy,
-            online: true
+            online: true,
+            daemonConnected: true
           });
           return;
         }
@@ -70,6 +110,10 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
             at: Date.now(),
             meta: { status: event.session.status }
           });
+          return;
+        }
+        if (event.type === "session.updated") {
+          store.upsertSession(event.session);
           return;
         }
         if (event.type === "session.stopped") {
@@ -88,6 +132,11 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
         }
         if (event.type === "session.event") {
           store.addSessionEvent(event.event);
+          const session = store.getSession(event.event.sessionId);
+          const inboxItem = createInboxFromEvent(event.event, session);
+          if (inboxItem) {
+            store.addInboxItem(inboxItem);
+          }
           const subscribers = connections.subscribers.get(event.event.sessionId);
           subscribers?.forEach((client) => send(client, { type: "session.event", event: event.event }));
         }
@@ -96,7 +145,17 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
       socket.on("close", () => {
         if (machineId) {
           connections.daemons.delete(machineId);
-          store.updateMachineOnline(machineId, false);
+          const machine = store.updateMachineOnline(machineId, false);
+          if (machine) {
+            store.addInboxItem({
+              machineId,
+              title: `${machine.hostname} went offline`,
+              body: "The daemon disconnected, so remote sessions may need a moment to recover.",
+              level: "warning",
+              category: "machine-offline",
+              link: { type: "machine", targetId: machineId }
+            });
+          }
         }
       });
 
@@ -119,6 +178,7 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
         const subscribers = connections.subscribers.get(command.sessionId) ?? new Set<WebSocket>();
         subscribers.add(socket);
         connections.subscribers.set(command.sessionId, subscribers);
+        store.markSessionViewed(command.sessionId);
         const session = store.getSession(command.sessionId);
         send(socket, {
           type: "session.snapshot",
@@ -145,6 +205,7 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
       }
 
       if (command.type === "input") {
+        store.updateSessionOwner(command.sessionId, "remote");
         send(daemon, { type: "session.input", sessionId: command.sessionId, data: command.data });
         store.addSessionEvent({
           id: randomUUID(),
@@ -156,6 +217,7 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
         return;
       }
       if (command.type === "resize") {
+        store.updateSessionOwner(command.sessionId, "remote");
         send(daemon, {
           type: "session.resize",
           sessionId: command.sessionId,
@@ -165,6 +227,7 @@ export function attachRealtime(server: HttpServer, store: BridgeStore): Connecti
         return;
       }
       if (command.type === "approval") {
+        store.updateSessionOwner(command.sessionId, "remote");
         send(daemon, {
           type: "approval.respond",
           sessionId: command.sessionId,

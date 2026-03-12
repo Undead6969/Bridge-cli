@@ -2,10 +2,10 @@ import { describe, expect, it } from "vitest";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { Dashboard } from "../components/dashboard";
-import { defaultPowerPolicy, type MachineRecord } from "@bridge/protocol";
+import { defaultPowerPolicy, type InboxItem, type MachineRecord, type SessionRecord } from "@bridge/protocol";
 
 describe("Dashboard", () => {
-  it("renders machine details", () => {
+  it("renders machine and session details in the phone shell", () => {
     const machines: MachineRecord[] = [
       {
         machineId: "m1",
@@ -49,12 +49,68 @@ describe("Dashboard", () => {
         },
         powerPolicy: defaultPowerPolicy,
         online: true,
+        daemonConnected: true,
         updatedAt: 1
       }
     ];
 
-    const html = renderToStaticMarkup(<Dashboard machines={machines} sessions={[]} serverBaseUrl="https://bridge.example.com" />);
+    const sessions: SessionRecord[] = [
+      {
+        id: "s1",
+        machineId: "m1",
+        runtime: "agent-session",
+        title: "codex session",
+        status: "waiting",
+        attention: "needs-review",
+        owner: "remote",
+        cwd: "/tmp",
+        agent: "codex",
+        startedBy: "web",
+        unreadCount: 2,
+        createdAt: 1,
+        updatedAt: 1
+      }
+    ];
+
+    const inbox: InboxItem[] = [
+      {
+        id: "i1",
+        sessionId: "s1",
+        machineId: "m1",
+        title: "codex session is ready",
+        body: "All set",
+        level: "success",
+        category: "session-ready",
+        createdAt: 1
+      }
+    ];
+
+    const html = renderToStaticMarkup(
+      <Dashboard
+        machines={machines}
+        sessions={sessions}
+        inbox={inbox}
+        serverBaseUrl="https://bridge.example.com"
+        activeTab="home"
+        selectedMachineId="m1"
+        activeSessionId="s1"
+        sessionEvents={[]}
+        composer=""
+        notificationsEnabled={false}
+        onSelectTab={() => undefined}
+        onSelectMachine={() => undefined}
+        onSelectSession={() => undefined}
+        onComposerChange={() => undefined}
+        onSendInput={() => undefined}
+        onLaunchSession={() => undefined}
+        onPowerChange={() => undefined}
+        onMarkInboxRead={() => undefined}
+        onToggleNotifications={() => undefined}
+      />
+    );
+
     expect(html).toContain("laptop");
-    expect(html).toContain("Codex: 5.4");
+    expect(html).toContain("Launch Codex");
+    expect(html).toContain("Codex 5.4");
   });
 });

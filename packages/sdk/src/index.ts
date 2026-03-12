@@ -1,5 +1,6 @@
 import {
   authTokenSchema,
+  inboxItemSchema,
   machineRecordSchema,
   pairingCodeSchema,
   pairingRequestSchema,
@@ -8,6 +9,7 @@ import {
   sessionSpecSchema,
   sessionStreamEventSchema,
   type AuthToken,
+  type InboxItem,
   type MachineRecord,
   type PowerPolicy,
   type SessionRecord,
@@ -82,6 +84,11 @@ export class BridgeSdk {
     return json(response, { parse: (value) => sessionRecordSchema.array().parse(value) });
   }
 
+  async listInbox(): Promise<InboxItem[]> {
+    const response = await fetch(`${this.baseUrl}/inbox`, { headers: this.headers() });
+    return json(response, { parse: (value) => inboxItemSchema.array().parse(value) });
+  }
+
   async createSession(machineId: string, spec: SessionSpec): Promise<SessionRecord> {
     const response = await fetch(`${this.baseUrl}/machines/${machineId}/sessions`, {
       method: "POST",
@@ -102,6 +109,14 @@ export class BridgeSdk {
   async listSessionEvents(sessionId: string): Promise<SessionStreamEvent[]> {
     const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/events`, { headers: this.headers() });
     return json(response, { parse: (value) => sessionStreamEventSchema.array().parse(value) });
+  }
+
+  async markSessionViewed(sessionId: string): Promise<SessionRecord> {
+    const response = await fetch(`${this.baseUrl}/sessions/${sessionId}/view`, {
+      method: "POST",
+      headers: this.headers()
+    });
+    return json(response, sessionRecordSchema);
   }
 
   subscribe(

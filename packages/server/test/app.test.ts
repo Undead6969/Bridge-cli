@@ -139,8 +139,11 @@ describe("server app", () => {
         runtime: "terminal-session",
         title: "terminal",
         status: "starting",
+        attention: "activity",
+        owner: "remote",
         cwd: "/tmp",
         startedBy: "web",
+        unreadCount: 0,
         createdAt: 1,
         updatedAt: 1
       },

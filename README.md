@@ -8,6 +8,7 @@ It gives you:
 - a local server that manages pairing, state, and realtime relays
 - a local daemon that runs Codex, Claude Code, Gemini, and terminal sessions
 - a CLI that can start the local stack, expose it publicly, and show a QR + code
+- a phone-first session UI with inbox, machine controls, and mobile session views
 
 Bridge is built so the web app can live on Vercel while the actual machine control stays on your laptop.
 
@@ -236,10 +237,19 @@ Working now:
 - hosted Vercel frontend
 - QR + numeric code pairing
 - auto-pair links with embedded `serverUrl`
+- phone-first app shell with `Home`, `Sessions`, `Inbox`, and `Settings`
+- session attention states, ownership markers, inbox events, and machine stale detection
 - local server + daemon health checks
 - terminal and agent session models
 - automatic local tunnel support for local servers
 - one-command `bridge` host flow
+- browser notifications while the app is open
+
+Production/public-host mode:
+
+- keep the frontend on Vercel
+- run `packages/server` on a VPS, home server, or Docker host
+- use [packages/server/Dockerfile](/Users/zex/Others/Prod/cli%20wrapper/packages/server/Dockerfile) as the starting point
 
 Still worth improving:
 

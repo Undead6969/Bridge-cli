@@ -13,6 +13,7 @@ type ManagedSession = SessionRecord & {
 
 type SessionManagerEvents = {
   "session.started": [SessionRecord];
+  "session.updated": [SessionRecord];
   "session.stopped": [string];
   "session.event": [SessionStreamEvent];
 };
@@ -52,12 +53,55 @@ function createEvent(sessionId: string, kind: SessionStreamEvent["kind"], data: 
   };
 }
 
+function summarizeOutput(data: string): Partial<Pick<SessionRecord, "status" | "attention">> & {
+  eventKind?: SessionStreamEvent["kind"];
+} {
+  if (/(approve|approval|permission)/i.test(data)) {
+    return {
+      status: "approval-needed",
+      attention: "urgent"
+    };
+  }
+  if (/(blocked|failed|error:|fix required)/i.test(data)) {
+    return {
+      status: "blocked",
+      attention: "urgent",
+      eventKind: "blocked"
+    };
+  }
+  if (/(done|completed|finished|ready for review|all set)/i.test(data)) {
+    return {
+      status: "completed",
+      attention: "needs-review",
+      eventKind: "completed"
+    };
+  }
+  if (/(waiting|standing by|awaiting|ready)/i.test(data)) {
+    return {
+      status: "waiting",
+      attention: "needs-review",
+      eventKind: "ready"
+    };
+  }
+  return {
+    status: "running",
+    attention: "activity"
+  };
+}
+
 function normalizeTerminalInput(data: string): string {
   return data.replace(/\r?\n/g, "\r");
 }
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private sessions = new Map<string, ManagedSession>();
+
+  private emitSessionUpdated(sessionId: string): void {
+    const session = this.get(sessionId);
+    if (session) {
+      this.emit("session.updated", session);
+    }
+  }
 
   list(): SessionRecord[] {
     return [...this.sessions.values()].map(({ child: _child, pty: _pty, pendingApprovals: _pendingApprovals, ...session }) => session);
@@ -75,11 +119,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       runtime: spec.runtime,
       title: spec.runtime === "agent-session" ? `${spec.agent} session` : spec.profile ?? "terminal",
       status: "starting",
+      attention: "activity",
+      owner: spec.startedBy === "cli" ? "local" : spec.startedBy === "web" || spec.startedBy === "pwa" ? "remote" : "shared",
       cwd: spec.cwd,
       agent: spec.runtime === "agent-session" ? spec.agent : undefined,
       shell: spec.runtime === "terminal-session" ? spec.shell ?? process.env.SHELL ?? "/bin/sh" : undefined,
       terminalBackend: undefined,
       startedBy: spec.startedBy,
+      lastEventAt: now,
+      lastViewedAt: spec.startedBy === "web" || spec.startedBy === "pwa" ? now : undefined,
+      unreadCount: 0,
       createdAt: now,
       updatedAt: now,
       pendingApprovals: new Map()
@@ -103,8 +152,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           return;
         }
         current.status = "stopped";
+        current.attention = "idle";
         current.updatedAt = Date.now();
         this.emit("session.event", createEvent(session.id, "status", `process exited`, { code, signal }));
+        this.emitSessionUpdated(session.id);
         this.emit("session.stopped", session.id);
       });
     } else {
@@ -138,8 +189,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           return;
         }
         current.status = "stopped";
+        current.attention = "idle";
         current.updatedAt = Date.now();
         this.emit("session.event", createEvent(session.id, "status", `pty exited`, { code: exitCode, signal, backend: "node-pty" }));
+        this.emitSessionUpdated(session.id);
         this.emit("session.stopped", session.id);
       });
       session.shell = shell;
@@ -188,8 +241,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         return;
       }
       current.status = "stopped";
+      current.attention = "idle";
       current.updatedAt = Date.now();
       this.emit("session.event", createEvent(session.id, "status", `pty exited`, { code, signal, backend: "python-pty" }));
+      this.emitSessionUpdated(session.id);
       this.emit("session.stopped", session.id);
     });
     this.emit("session.event", createEvent(session.id, "system", "terminal backend: python-pty", { backend: "python-pty", shell }));
@@ -201,6 +256,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     session.updatedAt = Date.now();
+    session.lastEventAt = session.updatedAt;
+    this.emitSessionUpdated(sessionId);
   }
 
   private handleChunk(sessionId: string, kind: "stdout" | "stderr", data: string): void {
@@ -209,10 +266,13 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     session.updatedAt = Date.now();
+    session.lastEventAt = session.updatedAt;
     this.emit("session.event", createEvent(sessionId, kind, data));
     if (session.runtime === "agent-session" && /(approve|approval|permission)/i.test(data)) {
       const requestId = randomUUID();
       session.pendingApprovals.set(requestId, "pending");
+      session.status = "approval-needed";
+      session.attention = "urgent";
       this.emit(
         "session.event",
         createEvent(sessionId, "approval", data, {
@@ -220,7 +280,16 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           state: "pending"
         })
       );
+      this.emitSessionUpdated(sessionId);
+      return;
     }
+    const summary = summarizeOutput(data);
+    session.status = summary.status ?? session.status;
+    session.attention = summary.attention ?? session.attention;
+    if (summary.eventKind) {
+      this.emit("session.event", createEvent(sessionId, summary.eventKind, data));
+    }
+    this.emitSessionUpdated(sessionId);
   }
 
   input(sessionId: string, data: string): void {
@@ -236,6 +305,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       throw new Error(`Session ${sessionId} is not writable`);
     }
     this.updateTerminalMetadata(sessionId);
+    session.owner = "remote";
     this.emit("session.event", createEvent(sessionId, "input", data));
   }
 
@@ -250,6 +320,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       session.child.stdin.write(`stty cols ${cols} rows ${rows}\n`);
     }
     this.updateTerminalMetadata(sessionId);
+    session.owner = "remote";
     this.emit(
       "session.event",
       createEvent(sessionId, "system", `resized to ${cols}x${rows}`, {
@@ -270,6 +341,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
     session.pendingApprovals.delete(requestId);
     this.input(sessionId, decision === "approve" ? "y\n" : "n\n");
+    session.status = decision === "approve" ? "running" : "blocked";
+    session.attention = decision === "approve" ? "activity" : "urgent";
     this.emit(
       "session.event",
       createEvent(sessionId, "approval", `approval ${decision}`, {
@@ -277,6 +350,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         state: decision
       })
     );
+    this.emitSessionUpdated(sessionId);
   }
 
   stop(sessionId: string): SessionRecord {
@@ -287,7 +361,10 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.pty?.kill();
     session.child?.kill("SIGTERM");
     session.status = "stopped";
+    session.attention = "idle";
     session.updatedAt = Date.now();
+    session.lastEventAt = session.updatedAt;
+    this.emitSessionUpdated(sessionId);
     return this.get(sessionId)!;
   }
 }
