@@ -7,3 +7,4 @@ hapy-main.zip
 *.tsbuildinfo
 reference-happy
 happy-src
+.vercel

@@ -5,7 +5,7 @@ import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
 
 const baseUrl = process.env.BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
-const appUrl = process.env.BRIDGE_APP_URL ?? "http://127.0.0.1:3000";
+const appUrl = process.env.BRIDGE_APP_URL ?? "https://app-web-sand.vercel.app";
 const auth = readAuthToken();
 const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
@@ -186,4 +186,8 @@ program
     await new Promise(() => undefined);
   });
 
-await program.parseAsync(process.argv);
+if (process.argv.length <= 2) {
+  await printPairing("bridge");
+} else {
+  await program.parseAsync(process.argv);
+}
