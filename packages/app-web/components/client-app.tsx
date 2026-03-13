@@ -14,6 +14,7 @@ async function fetchJson<T>(base: string, path: string, token?: string, init?: R
     ...init,
     headers: {
       "content-type": "application/json",
+      "bypass-tunnel-reminder": "bridge",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {})
     }

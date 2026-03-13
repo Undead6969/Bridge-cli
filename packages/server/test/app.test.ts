@@ -173,5 +173,6 @@ describe("server app", () => {
 
     expect(response.statusCode).toBe(204);
     expect(response.headers["access-control-allow-origin"]).toBe("https://app-web-sand.vercel.app");
+    expect(String(response.headers["access-control-allow-headers"])).toContain("bypass-tunnel-reminder");
   });
 });

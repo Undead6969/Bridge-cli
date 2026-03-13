@@ -33,13 +33,16 @@ export class BridgeSdk {
   ) {}
 
   private headers(): Record<string, string> {
-    return this.token ? { Authorization: `Bearer ${this.token}` } : {};
+    return {
+      "bypass-tunnel-reminder": "bridge",
+      ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
+    };
   }
 
   async createPairing(label?: string): Promise<{ code: string; expiresAt: number }> {
     const response = await fetch(`${this.baseUrl}/auth/pairings/request`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...this.headers() },
       body: JSON.stringify(pairingRequestSchema.parse({ label }))
     });
     return json(response, {
@@ -54,7 +57,7 @@ export class BridgeSdk {
   async exchangePairing(code: string, label?: string): Promise<AuthToken> {
     const response = await fetch(`${this.baseUrl}/auth/pairings/exchange`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...this.headers() },
       body: JSON.stringify(pairingCodeSchema.parse({ code, label }))
     });
     return json(response, authTokenSchema);

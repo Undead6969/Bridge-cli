@@ -3,22 +3,31 @@ import { BridgeSdk } from "../src/index.js";
 
 describe("BridgeSdk", () => {
   it("exchanges pairing codes for tokens", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => ({
+        token: "token-1",
+        label: "termux",
+        createdAt: 1,
+        lastUsedAt: 1
+      })
+    });
     vi.stubGlobal(
       "fetch",
-      vi.fn().mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({
-          token: "token-1",
-          label: "termux",
-          createdAt: 1,
-          lastUsedAt: 1
-        })
-      })
+      fetchMock
     );
 
     const sdk = new BridgeSdk("http://localhost:8787");
     const token = await sdk.exchangePairing("123456", "termux");
     expect(token.token).toBe("token-1");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "http://localhost:8787/auth/pairings/exchange",
+      expect.objectContaining({
+        headers: expect.objectContaining({
+          "bypass-tunnel-reminder": "bridge"
+        })
+      })
+    );
   });
 
   it("creates sessions with validated payloads", async () => {

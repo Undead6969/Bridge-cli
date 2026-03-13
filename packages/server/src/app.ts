@@ -31,7 +31,7 @@ export function createApp(store = new BridgeStore()) {
       callback(originAllowed(origin) ? null : new Error("Origin not allowed"), true);
     },
     methods: ["GET", "POST", "PUT", "OPTIONS"],
-    allowedHeaders: ["authorization", "content-type"]
+    allowedHeaders: ["authorization", "content-type", "bypass-tunnel-reminder"]
   });
 
   app.addHook("onReady", async () => {
