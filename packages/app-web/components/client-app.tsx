@@ -393,6 +393,11 @@ export function ClientApp({
             Pair once, then launch Codex, Claude Code, Gemini CLI, or a raw terminal from the same mobile-shaped app.
             If the network hiccups, Bridge reconnects instead of entering interpretive dance.
           </p>
+          <div className="hero-pills">
+            <span className="capability-pill capability-good">QR + 6-digit code</span>
+            <span className="capability-pill capability-good">Codex / Claude / Gemini</span>
+            <span className="capability-pill capability-good">Terminal from phone</span>
+          </div>
           <div className="stats">
             <div className="stat-card">
               <strong>{machines.length}</strong>

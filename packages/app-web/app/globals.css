@@ -94,6 +94,11 @@ button {
   letter-spacing: -0.03em;
 }
 
+.hero h1 {
+  font-size: clamp(2rem, 4vw, 3.7rem);
+  line-height: 1.02;
+}
+
 .hero-text {
   max-width: 58ch;
   font-size: 1.02rem;
@@ -205,7 +210,8 @@ button {
 .launcher,
 .capability-row,
 .machine-health,
-.session-metadata {
+.session-metadata,
+.hero-pills {
   display: flex;
   gap: 10px;
   flex-wrap: wrap;
@@ -222,6 +228,10 @@ button {
 
 .code-input {
   width: 100%;
+}
+
+.pair-controls {
+  align-items: stretch;
 }
 
 .cta-button,
@@ -264,6 +274,12 @@ button {
   padding: 16px;
   border-radius: 24px;
   background: white;
+}
+
+.qr-card svg {
+  display: block;
+  width: min(100%, 192px);
+  height: auto;
 }
 
 .qr-empty {
@@ -446,6 +462,10 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .pair-card {
+    order: -1;
+  }
+
   .stack-on-mobile {
     flex-direction: column;
     align-items: flex-start;
@@ -453,11 +473,27 @@ button {
 }
 
 @media (max-width: 640px) {
+  body {
+    padding: 8px;
+  }
+
   .hero,
   .panel,
   .product-shell {
-    padding: 16px;
-    border-radius: 24px;
+    padding: 14px;
+    border-radius: 22px;
+  }
+
+  .hero-grid {
+    gap: 14px;
+  }
+
+  .hero-copy,
+  .pair-card,
+  .tab-body,
+  .stack-list,
+  .settings-list {
+    gap: 12px;
   }
 
   .stats,
@@ -467,8 +503,105 @@ button {
     grid-template-columns: 1fr;
   }
 
+  .stat-card,
+  .mini-stat,
+  .machine-card,
+  .session-card,
+  .inbox-card,
+  .settings-row {
+    border-radius: 18px;
+    padding: 14px;
+  }
+
+  .pair-card {
+    padding: 16px;
+    border-radius: 22px;
+  }
+
+  .pair-card-header,
+  .section-header,
+  .row-header {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .hero h1 {
+    font-size: 2.2rem;
+  }
+
+  .hero-text {
+    font-size: 0.95rem;
+    line-height: 1.5;
+  }
+
+  .hero-pills,
+  .machine-health,
+  .capability-row,
+  .session-metadata {
+    gap: 8px;
+  }
+
+  .chip,
+  .composer-bar input,
+  .cta-button,
+  .action-button,
+  .launch-button,
+  .power-button,
+  .tabbar-button {
+    min-height: 48px;
+  }
+
+  .launcher,
+  .pair-controls {
+    flex-direction: column;
+  }
+
+  .qr-shell {
+    padding: 14px;
+    min-height: 0;
+  }
+
+  .qr-card {
+    width: 100%;
+    max-width: 240px;
+    padding: 12px;
+  }
+
+  .code-strip {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .product-shell {
+    padding-bottom: calc(92px + env(safe-area-inset-bottom));
+  }
+
+  .tabbar {
+    gap: 6px;
+    padding: 8px;
+    border-radius: 20px;
+    margin-bottom: 12px;
+  }
+
+  .tabbar-button {
+    padding: 10px 8px;
+    font-size: 0.86rem;
+  }
+
   .composer-bar {
     grid-template-columns: 1fr;
-    bottom: 82px;
+    bottom: calc(82px + env(safe-area-inset-bottom));
+    padding: 8px;
+  }
+
+  .transcript {
+    max-height: 46vh;
+    min-height: 220px;
+    padding: 10px;
+    border-radius: 18px;
+  }
+
+  .session-banner {
+    padding: 8px 10px;
   }
 }
