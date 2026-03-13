@@ -97,6 +97,8 @@ describe("Dashboard", () => {
         composer=""
         notificationsEnabled={false}
         theme="dark"
+        mobilePane="list"
+        settingsOpen={false}
         onSelectWorkspace={() => undefined}
         onSelectSession={() => undefined}
         onComposerChange={() => undefined}
@@ -108,6 +110,8 @@ describe("Dashboard", () => {
         onThemeChange={() => undefined}
         onDisconnect={() => undefined}
         onShowPairing={() => undefined}
+        onBackToSessions={() => undefined}
+        onToggleSettings={() => undefined}
       />
     );
 

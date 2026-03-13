@@ -111,6 +111,8 @@ export function ClientApp({
   const [showPairingPanel, setShowPairingPanel] = useState(false);
   const [theme, setTheme] = useState<ThemeMode>("dark");
   const [selectedWorkspace, setSelectedWorkspace] = useState("all");
+  const [mobilePane, setMobilePane] = useState<"list" | "chat">("list");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const socketRef = useRef<WebSocket | null>(null);
   const seenInboxIds = useRef<Set<string>>(new Set());
 
@@ -246,6 +248,9 @@ export function ClientApp({
         const currentActive = sessionData.find((session) => session.id === activeSessionId);
         const nextSession = currentActive ?? sessionData[0] ?? null;
         setActiveSessionId(nextSession?.id ?? null);
+        if (nextSession) {
+          setMobilePane("chat");
+        }
         setSelectedWorkspace((current) => (current !== "all" && sessionData.some((session) => session.cwd === current) ? current : nextSession?.cwd ?? "all"));
       } catch (loadError) {
         if (!cancelled) {
@@ -442,6 +447,7 @@ export function ClientApp({
       setSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
       setActiveSessionId(created.id);
       setSelectedWorkspace(created.cwd);
+      setMobilePane("chat");
       setPairingMessage(`${target === "terminal" ? "Terminal" : target} launched in ${workspaceLabel(created.cwd)}.`);
       setError("");
     } catch (launchError) {
@@ -496,6 +502,8 @@ export function ClientApp({
     setConnectedSince(null);
     setHasLoadedRemoteData(false);
     setShowPairingPanel(true);
+    setSettingsOpen(false);
+    setMobilePane("list");
     setPairingMessage("Connection reset. Pair again with the latest code.");
   };
 
@@ -595,8 +603,13 @@ export function ClientApp({
       composer={composer}
       notificationsEnabled={notificationsEnabled}
       theme={theme}
+      mobilePane={mobilePane}
+      settingsOpen={settingsOpen}
       onSelectWorkspace={setSelectedWorkspace}
-      onSelectSession={setActiveSessionId}
+      onSelectSession={(sessionId) => {
+        setActiveSessionId(sessionId);
+        setMobilePane("chat");
+      }}
       onComposerChange={setComposer}
       onSendInput={sendInput}
       onLaunchSession={launchSession}
@@ -606,6 +619,8 @@ export function ClientApp({
       onThemeChange={setTheme}
       onDisconnect={disconnect}
       onShowPairing={() => setShowPairingPanel(true)}
+      onBackToSessions={() => setMobilePane("list")}
+      onToggleSettings={() => setSettingsOpen((current) => !current)}
     />
   );
 }

@@ -14,6 +14,8 @@ type DashboardProps = {
   composer: string;
   notificationsEnabled: boolean;
   theme: ThemeMode;
+  mobilePane: "list" | "chat";
+  settingsOpen: boolean;
   onSelectWorkspace: (workspace: string) => void;
   onSelectSession: (sessionId: string) => void;
   onComposerChange: (value: string) => void;
@@ -25,6 +27,8 @@ type DashboardProps = {
   onThemeChange: (theme: ThemeMode) => void;
   onDisconnect: () => void;
   onShowPairing: () => void;
+  onBackToSessions: () => void;
+  onToggleSettings: () => void;
 };
 
 type WorkspaceOption = {
@@ -136,6 +140,137 @@ function avatarSeed(input: string): string {
   return seeds[value % seeds.length] ?? seeds[0];
 }
 
+type ParsedCard =
+  | { type: "tool"; title: string; body: string; meta?: string }
+  | { type: "approval"; title: string; body: string; meta?: string }
+  | { type: "file"; title: string; body: string; meta?: string }
+  | { type: "command"; title: string; body: string; meta?: string }
+  | { type: "status"; title: string; body: string; meta?: string }
+  | { type: "message"; title: string; body: string; meta?: string };
+
+function trimMessage(input: string, limit = 280): string {
+  const compact = input.replace(/\s+/g, " ").trim();
+  if (compact.length <= limit) {
+    return compact;
+  }
+  return `${compact.slice(0, limit - 1)}…`;
+}
+
+function findPath(input: string): string | null {
+  const match = input.match(/([~/.][\w./-]+(?:\.[\w-]+)?)/);
+  return match?.[1] ?? null;
+}
+
+function parseEventCard(event: SessionStreamEvent): ParsedCard {
+  const text = event.data.trim();
+  if (event.kind === "approval") {
+    return {
+      type: "approval",
+      title: "Approval needed",
+      body: trimMessage(text || "Bridge is waiting for a yes/no."),
+      meta: event.meta?.requestId ? `request ${String(event.meta.requestId)}` : "respond from phone"
+    };
+  }
+  if (event.kind === "blocked") {
+    return {
+      type: "status",
+      title: "Blocked",
+      body: trimMessage(text || "The agent hit something prickly."),
+      meta: "needs intervention"
+    };
+  }
+  if (event.kind === "completed" || event.kind === "ready") {
+    return {
+      type: "status",
+      title: event.kind === "completed" ? "Finished" : "Ready",
+      body: trimMessage(text || "The agent wrapped up this step."),
+      meta: "review suggested"
+    };
+  }
+  if (event.kind === "system") {
+    const path = findPath(text);
+    const toolMatch = text.match(/([a-z][\w-]+)\((.*)\)/i);
+    if (toolMatch) {
+      return {
+        type: "tool",
+        title: toolMatch[1] ?? "Tool call",
+        body: trimMessage(toolMatch[2] || text),
+        meta: "tool activity"
+      };
+    }
+    if (path) {
+      return {
+        type: "file",
+        title: path.split("/").pop() ?? path,
+        body: trimMessage(text),
+        meta: path
+      };
+    }
+    return {
+      type: "status",
+      title: "System",
+      body: trimMessage(text),
+      meta: "session event"
+    };
+  }
+  if (event.kind === "stderr") {
+    const path = findPath(text);
+    return {
+      type: path ? "file" : "message",
+      title: path ? "Workspace activity" : "Agent note",
+      body: trimMessage(text || "stderr"),
+      meta: path ?? "stderr"
+    };
+  }
+  if (event.kind === "stdout") {
+    const command = text.match(/^\$\s+(.+)/m)?.[1];
+    const path = findPath(text);
+    if (command) {
+      return {
+        type: "command",
+        title: command.split(" ")[0] ?? "Command",
+        body: trimMessage(command),
+        meta: "shell activity"
+      };
+    }
+    if (path) {
+      return {
+        type: "file",
+        title: path.split("/").pop() ?? path,
+        body: trimMessage(text),
+        meta: path
+      };
+    }
+  }
+  if (event.kind === "input") {
+    return {
+      type: "message",
+      title: "You",
+      body: trimMessage(text),
+      meta: "remote input"
+    };
+  }
+  return {
+    type: "message",
+    title: "Agent",
+    body: trimMessage(text),
+    meta: undefined
+  };
+}
+
+function terminalBuffer(events: SessionStreamEvent[]): string {
+  return events
+    .filter((event) => ["stdout", "stderr", "input", "system", "status", "blocked", "completed", "ready"].includes(event.kind))
+    .map((event) => {
+      if (event.kind === "input") {
+        return `$ ${event.data.replace(/\n$/, "")}`;
+      }
+      return event.data;
+    })
+    .join("")
+    .trim();
+}
+
 export function Dashboard(props: DashboardProps) {
   const {
     machines,
@@ -148,6 +283,8 @@ export function Dashboard(props: DashboardProps) {
     composer,
     notificationsEnabled,
     theme,
+    mobilePane,
+    settingsOpen,
     onSelectWorkspace,
     onSelectSession,
     onComposerChange,
@@ -158,7 +295,9 @@ export function Dashboard(props: DashboardProps) {
     onToggleNotifications,
     onThemeChange,
     onDisconnect,
-    onShowPairing
+    onShowPairing,
+    onBackToSessions,
+    onToggleSettings
   } = props;
 
   const sessionsByWorkspace = React.useMemo(() => {
@@ -219,9 +358,12 @@ export function Dashboard(props: DashboardProps) {
   const activePreview = activeSession ? sessionPreview(activeSession, sessionEvents) : "Pick a session to start.";
   const hasActiveApprovals = filteredSessions.some((session) => session.status === "approval-needed");
   const unreadCount = filteredSessions.reduce((count, session) => count + session.unreadCount, 0);
+  const thinking = Boolean(activeSession && (activeSession.status === "running" || activeSession.status === "starting") && composer.trim().length === 0);
+  const transcriptCards = activeSession ? sessionEvents.map((event) => ({ event, card: parseEventCard(event) })) : [];
+  const terminalText = activeSession?.runtime === "terminal-session" ? terminalBuffer(sessionEvents) : "";
 
   return (
-    <section className="messenger-shell">
+    <section className={`messenger-shell ${mobilePane === "chat" ? "messenger-mobile-chat" : ""} ${settingsOpen ? "messenger-settings-open" : ""}`}>
       <header className="app-header">
         <div className="app-header-main">
           <div className="brand-mark">B</div>
@@ -240,6 +382,9 @@ export function Dashboard(props: DashboardProps) {
           </select>
           <button className="header-icon-button" onClick={onShowPairing} type="button" aria-label="Show pairing controls">
             Pair
+          </button>
+          <button className="header-icon-button" onClick={onToggleSettings} type="button" aria-label="Toggle settings">
+            Settings
           </button>
         </div>
       </header>
@@ -319,6 +464,9 @@ export function Dashboard(props: DashboardProps) {
             <>
               <header className="chat-header">
                 <div className="chat-header-left">
+                  <button className="mobile-back-button" onClick={onBackToSessions} type="button" aria-label="Back to sessions">
+                    ←
+                  </button>
                   <div className="chat-avatar large-avatar" style={{ backgroundColor: avatarSeed(activeSession.title) }}>
                     {displayRuntime(activeSession).slice(0, 1)}
                   </div>
@@ -332,6 +480,7 @@ export function Dashboard(props: DashboardProps) {
                 <div className="chat-header-right">
                   <span className={`session-badge badge-${sessionTone(activeSession)}`}>{sessionStatusCopy(activeSession)}</span>
                   <span className="header-meta-pill">{activeSession.owner}</span>
+                  <button className="header-icon-button compact-button" onClick={onToggleSettings} type="button">⋯</button>
                 </div>
               </header>
 
@@ -353,32 +502,82 @@ export function Dashboard(props: DashboardProps) {
               </section>
 
               <section className={`chat-transcript ${activeSession.runtime === "terminal-session" ? "chat-transcript-terminal" : ""}`}>
-                {sessionEvents.length === 0 ? (
+                {activeSession.runtime === "terminal-session" ? (
+                  <div className="terminal-shell">
+                    <div className="terminal-shell-header">
+                      <span className="terminal-dot terminal-red" />
+                      <span className="terminal-dot terminal-yellow" />
+                      <span className="terminal-dot terminal-green" />
+                      <strong>{activeSession.shell ?? "shell"}</strong>
+                    </div>
+                    <pre className="terminal-screen">{terminalText || "Waiting for terminal output..."}</pre>
+                  </div>
+                ) : sessionEvents.length === 0 ? (
                   <div className="message-system">No messages yet. This session is either brand new or plotting.</div>
                 ) : (
-                  sessionEvents.map((event) => {
+                  transcriptCards.map(({ event, card }) => {
                     const isUser = event.kind === "input";
-                    const tone =
-                      event.kind === "approval"
-                        ? "warning"
-                        : event.kind === "blocked"
-                          ? "danger"
-                          : event.kind === "completed" || event.kind === "ready"
-                            ? "success"
-                            : event.kind === "stderr"
-                              ? "neutral"
-                              : isUser
-                                ? "user"
-                                : "default";
+                    if (card.type === "approval") {
+                      return (
+                        <article key={event.id} className="message-card message-card-approval">
+                          <div className="message-card-top">
+                            <span className="message-card-icon">!</span>
+                            <div>
+                              <strong>{card.title}</strong>
+                              <div className="message-card-meta">{card.meta}</div>
+                            </div>
+                          </div>
+                          <p>{card.body}</p>
+                          <div className="message-card-actions">
+                            <button className="mini-action">Approve in terminal</button>
+                            <button className="mini-action ghost-button">Review first</button>
+                          </div>
+                        </article>
+                      );
+                    }
+                    if (card.type === "tool" || card.type === "command" || card.type === "file" || card.type === "status") {
+                      return (
+                        <article key={event.id} className={`message-card message-card-${card.type}`}>
+                          <div className="message-card-top">
+                            <span className="message-card-icon">
+                              {card.type === "tool" ? "◉" : card.type === "command" ? ">" : card.type === "file" ? "#" : "•"}
+                            </span>
+                            <div>
+                              <strong>{card.title}</strong>
+                              <div className="message-card-meta">{card.meta ?? formatTime(event.at)}</div>
+                            </div>
+                          </div>
+                          <p>{card.body}</p>
+                        </article>
+                      );
+                    }
                     return (
-                      <article key={event.id} className={`message-bubble message-${tone}`}>
-                        <div className="message-kind">{event.kind}</div>
+                      <article key={event.id} className={`message-bubble ${isUser ? "message-user" : "message-default"}`}>
+                        <div className="message-kind">{isUser ? "You" : displayRuntime(activeSession)}</div>
                         <pre>{event.data}</pre>
                         <div className="message-meta">{formatTime(event.at)}</div>
                       </article>
                     );
                   })
                 )}
+                {thinking && activeSession.runtime !== "terminal-session" ? (
+                  <div className="thinking-block">
+                    <div className="thinking-avatar">{displayRuntime(activeSession).slice(0, 1)}</div>
+                    <div className="thinking-card">
+                      <div className="thinking-label">{displayRuntime(activeSession)} is thinking</div>
+                      <div className="thinking-dots">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                      <div className="thinking-lines">
+                        <span />
+                        <span />
+                        <span />
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
               </section>
 
               <footer className="chat-composer">
@@ -402,7 +601,7 @@ export function Dashboard(props: DashboardProps) {
           )}
         </main>
 
-        <aside className="settings-rail">
+        <aside className={`settings-rail ${settingsOpen ? "settings-rail-open" : ""}`}>
           <div className="settings-card">
             <div className="settings-card-title">Connection</div>
             <div className="settings-card-body">
