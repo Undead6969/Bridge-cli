@@ -24,6 +24,14 @@ type PairingRecord = PairingCode & {
   token?: AuthToken;
 };
 
+export type PairingStatus = {
+  code: string;
+  label?: string;
+  expiresAt: number;
+  consumedAt?: number;
+  tokenLabel?: string;
+};
+
 type PersistedState = {
   machines: MachineRecord[];
   sessions: SessionRecord[];
@@ -362,6 +370,21 @@ export class BridgeStore {
     this.state.authTokens.push(token);
     this.persist();
     return token;
+  }
+
+  getPairingStatus(code: string): PairingStatus | undefined {
+    this.prunePairings();
+    const pairing = this.state.pairings.find((item) => item.code === code);
+    if (!pairing) {
+      return undefined;
+    }
+    return {
+      code: pairing.code,
+      label: pairing.label,
+      expiresAt: pairing.expiresAt,
+      consumedAt: pairing.consumedAt,
+      tokenLabel: pairing.token?.label
+    };
   }
 
   getToken(token: string): AuthToken | undefined {

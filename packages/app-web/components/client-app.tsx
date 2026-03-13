@@ -13,11 +13,37 @@ function requiresTunnelBypass(baseUrl: string): boolean {
   return /\.loca\.lt$/i.test(new URL(baseUrl).hostname);
 }
 
+function friendlyError(message: string): string {
+  const trimmed = message.trim();
+  let normalized = trimmed;
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    try {
+      const parsed = JSON.parse(trimmed) as { message?: string };
+      if (parsed.message) {
+        normalized = parsed.message;
+      }
+    } catch {
+      normalized = trimmed;
+    }
+  }
+  if (/Invalid or expired pairing code/i.test(normalized)) {
+    return "That code expired or was already used. Press r in Bridge for a fresh one.";
+  }
+  if (/Body cannot be empty/i.test(normalized)) {
+    return "Bridge sent an empty request. That was us, not you.";
+  }
+  if (/Unauthorized|401/i.test(normalized)) {
+    return "This browser lost its session. Pair again with the latest code.";
+  }
+  return normalized;
+}
+
 async function fetchJson<T>(base: string, path: string, token?: string, init?: RequestInit): Promise<T> {
+  const hasBody = init?.body !== undefined;
   const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
-      "content-type": "application/json",
+      ...(hasBody ? { "content-type": "application/json" } : {}),
       ...(requiresTunnelBypass(base) ? { "bypass-tunnel-reminder": "bridge" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {})
@@ -63,8 +89,10 @@ export function ClientApp({
   const [composer, setComposer] = useState("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [reconnectHint, setReconnectHint] = useState("");
+  const [connectedSince, setConnectedSince] = useState<number | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const seenInboxIds = useRef<Set<string>>(new Set());
+  const hadLoadedRemoteData = useRef(false);
 
   const hostedAppOrigin = useMemo(() => {
     const publicUrl = process.env.NEXT_PUBLIC_BRIDGE_APP_URL;
@@ -88,6 +116,7 @@ export function ClientApp({
     const storedNotifications = window.localStorage.getItem(notificationsKey);
     if (storedToken) {
       setToken(storedToken);
+      setConnectedSince(Date.now());
     }
     if (storedServerUrl) {
       setServerBaseUrl(storedServerUrl);
@@ -129,15 +158,16 @@ export function ClientApp({
           body: JSON.stringify({ code: exchangeCode, label: "web-client" })
         });
         setToken(payload.token);
+        setConnectedSince(Date.now());
         window.localStorage.setItem(tokenKey, payload.token);
         setError("");
-        setPairingMessage("Browser paired. You are now legally allowed to feel powerful.");
+        setPairingMessage("Connected. Your phone is now the remote cockpit.");
         params.delete("pairCode");
         params.delete("serverUrl");
         const nextUrl = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
         window.history.replaceState({}, "", nextUrl);
       } catch (exchangeError) {
-        setError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code");
+        setError(friendlyError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code"));
         setPairingMessage("That pairing link expired or got used already.");
       } finally {
         setIsPairing(false);
@@ -168,15 +198,19 @@ export function ClientApp({
         setMachines(machineData);
         setSessions(sessionData);
         setInbox(inboxData);
+        hadLoadedRemoteData.current = true;
+        setError("");
+        setPairingMessage("Connected to Bridge. Pick a machine and launch something dangerous-looking.");
         setSelectedMachineId((current) => current ?? machineData[0]?.machineId ?? null);
         setActiveSessionId((current) => current ?? sessionData[0]?.id ?? null);
       } catch (loadError) {
         if (!cancelled) {
-          const message = loadError instanceof Error ? loadError.message : "Failed to load data";
+          const message = friendlyError(loadError instanceof Error ? loadError.message : "Failed to load data");
           setError(message);
           if (/401|unauthorized/i.test(message)) {
             window.localStorage.removeItem(tokenKey);
             setToken(null);
+            setConnectedSince(null);
             setPairingMessage("That browser session expired. Pair again with the latest code.");
           }
         }
@@ -230,7 +264,7 @@ export function ClientApp({
         }
       } catch (loadError) {
         if (!cancelled) {
-          setReconnectHint(loadError instanceof Error ? loadError.message : "Reconnect failed");
+      setReconnectHint(loadError instanceof Error ? loadError.message : "Reconnect failed");
         }
       }
     };
@@ -301,10 +335,10 @@ export function ClientApp({
       setError("Enter a Bridge server URL first.");
       return;
     }
-    const payload = await fetchJson<{ code: string; expiresAt: number }>(serverBaseUrl, "/auth/pairings/request", undefined, {
-      method: "POST",
-      body: JSON.stringify({ label: "web" })
-    });
+      const payload = await fetchJson<{ code: string; expiresAt: number }>(serverBaseUrl, "/auth/pairings/request", undefined, {
+        method: "POST",
+        body: JSON.stringify({ label: "web" })
+      });
     setPairingCode(payload.code);
     setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}&serverUrl=${serverBaseUrl}`);
     setError("");
@@ -324,9 +358,10 @@ export function ClientApp({
       setToken(payload.token);
       window.localStorage.setItem(tokenKey, payload.token);
       setError("");
-      setPairingMessage("Browser paired and ready.");
+      setPairingMessage("Connected. Your phone is now the remote cockpit.");
+      setConnectedSince(Date.now());
     } catch (exchangeError) {
-      setError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code");
+      setError(friendlyError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code"));
       setPairingMessage("That code did not work. Tiny betrayal, but fixable.");
     } finally {
       setIsPairing(false);
@@ -346,13 +381,19 @@ export function ClientApp({
       target === "terminal"
         ? { runtime: "terminal-session", cwd: process.env.NEXT_PUBLIC_BRIDGE_DEFAULT_CWD ?? "/", startedBy: "web", shell: machine.capabilities.terminal.shellPath }
         : { runtime: "agent-session", agent: target, cwd: process.env.NEXT_PUBLIC_BRIDGE_DEFAULT_CWD ?? "/", startedBy: "web" };
-    const created = await fetchJson<SessionRecord>(serverBaseUrl, `/machines/${machineId}/sessions`, token, {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-    setSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
-    setActiveSessionId(created.id);
-    setActiveTab("sessions");
+    try {
+      const created = await fetchJson<SessionRecord>(serverBaseUrl, `/machines/${machineId}/sessions`, token, {
+        method: "POST",
+        body: JSON.stringify(payload)
+      });
+      setError("");
+      setSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
+      setActiveSessionId(created.id);
+      setActiveTab("sessions");
+      setPairingMessage(`${target === "terminal" ? "Terminal" : target} launched on ${machine.hostname}.`);
+    } catch (launchError) {
+      setError(friendlyError(launchError instanceof Error ? launchError.message : "Failed to launch session"));
+    }
   };
 
   const sendInput = () => {
@@ -399,16 +440,29 @@ export function ClientApp({
     setNotificationsEnabled((current) => !current);
   };
 
+  const isConnected = Boolean(token) && hadLoadedRemoteData.current;
+  const connectedSessionCount = sessions.filter((session) => session.status !== "stopped").length;
+  const unreadInboxCount = inbox.filter((item) => !item.readAt).length;
+
   return (
     <div className="shell">
       <section className="hero hero-grid">
         <div className="hero-copy">
-          <span className="badge">Phone-first / QR + code pairing / runtime switching</span>
+          <span className={`badge ${isConnected ? "badge-connected" : ""}`}>{isConnected ? "Connected / phone remote active" : "Phone-first / QR + code pairing / runtime switching"}</span>
           <h1>Bridge turns your laptop into a remote command deck you can actually drive from your phone.</h1>
           <p className="muted hero-text">
             Pair once, then launch Codex, Claude Code, Gemini CLI, or a raw terminal from the same mobile-shaped app.
             If the network hiccups, Bridge reconnects instead of entering interpretive dance.
           </p>
+          {isConnected ? (
+            <div className="connection-banner">
+              <div>
+                <strong>Connected to your machine</strong>
+                <div className="muted">{serverBaseUrl} • {connectedSessionCount} live session{connectedSessionCount === 1 ? "" : "s"} • {unreadInboxCount} inbox</div>
+              </div>
+              <span className="status-pill tone-good">{connectedSince ? `paired ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(connectedSince)}` : "paired"}</span>
+            </div>
+          ) : null}
           <div className="hero-pills">
             <span className="capability-pill capability-good">QR + 6-digit code</span>
             <span className="capability-pill capability-good">Codex / Claude / Gemini</span>
@@ -433,13 +487,13 @@ export function ClientApp({
 
         <div className="pair-card">
           <div className="pair-card-header">
-            <h2>Pair This Browser</h2>
-            <span className="status-pill">{token ? "Connected" : "Ready to pair"}</span>
+            <h2>{isConnected ? "Bridge Connected" : "Pair This Browser"}</h2>
+            <span className={`status-pill ${isConnected ? "tone-good" : ""}`}>{isConnected ? "Connected" : "Ready to pair"}</span>
           </div>
           <p className="muted">{pairingMessage}</p>
           <div className="launcher">
             <button className="cta-button" onClick={requestPairing} type="button">
-              Generate Pairing Code
+              {isConnected ? "Pair Another Browser" : "Generate Pairing Code"}
             </button>
           </div>
           <div className="launcher pair-controls">
@@ -476,7 +530,8 @@ export function ClientApp({
               {isPairing ? "Connecting..." : "Connect"}
             </button>
           </div>
-          {error ? <p className="muted danger-text">{error}</p> : null}
+          {error && !isConnected ? <p className="muted danger-text">{error}</p> : null}
+          {error && isConnected ? <p className="muted warning-text">{error}</p> : null}
         </div>
       </section>
 

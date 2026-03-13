@@ -29,6 +29,10 @@ function normalizeShellPath(shell: string): string {
   return shell;
 }
 
+function interactiveProgramForAgent(agent: AgentKind): { command: string; args: string[] } {
+  return { command: commandForAgent(agent), args: [] };
+}
+
 function createSpawnEnv(overrides?: Record<string, string>): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(process.env)) {
@@ -135,29 +139,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     };
 
     if (spec.runtime === "agent-session") {
-      session.child = spawn(commandForAgent(spec.agent), [], {
-        cwd: spec.cwd,
-        env: createSpawnEnv(spec.env),
-        stdio: "pipe"
-      });
-      session.child.stdout?.on("data", (chunk) => {
-        this.handleChunk(session.id, "stdout", chunk.toString());
-      });
-      session.child.stderr?.on("data", (chunk) => {
-        this.handleChunk(session.id, "stderr", chunk.toString());
-      });
-      session.child.on("exit", (code, signal) => {
-        const current = this.sessions.get(session.id);
-        if (!current) {
-          return;
-        }
-        current.status = "stopped";
-        current.attention = "idle";
-        current.updatedAt = Date.now();
-        this.emit("session.event", createEvent(session.id, "status", `process exited`, { code, signal }));
-        this.emitSessionUpdated(session.id);
-        this.emit("session.stopped", session.id);
-      });
+      this.createAgentRuntime(session, spec);
     } else {
       this.createTerminalRuntime(session, spec);
     }
@@ -167,6 +149,79 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     this.emit("session.started", this.get(session.id)!);
 
     return this.get(session.id)!;
+  }
+
+  private createAgentRuntime(session: ManagedSession, spec: Extract<SessionSpec, { runtime: "agent-session" }>): void {
+    const program = interactiveProgramForAgent(spec.agent);
+    try {
+      session.pty = spawnPty(program.command, program.args, {
+        cwd: spec.cwd,
+        env: createSpawnEnv({
+          TERM: "xterm-256color",
+          COLORTERM: "truecolor",
+          ...spec.env
+        }),
+        cols: 120,
+        rows: 32,
+        name: "xterm-256color"
+      });
+      session.terminalBackend = "node-pty";
+      session.pty.onData((data) => {
+        this.handleChunk(session.id, "stdout", data);
+      });
+      session.pty.onExit(({ exitCode, signal }) => {
+        const current = this.sessions.get(session.id);
+        if (!current) {
+          return;
+        }
+        current.status = "stopped";
+        current.attention = "idle";
+        current.updatedAt = Date.now();
+        this.emit("session.event", createEvent(session.id, "status", "process exited", { code: exitCode, signal, backend: "node-pty" }));
+        this.emitSessionUpdated(session.id);
+        this.emit("session.stopped", session.id);
+      });
+      this.emit("session.event", createEvent(session.id, "system", "agent backend: node-pty", { backend: "node-pty", command: program.command }));
+      return;
+    } catch (error) {
+      this.emit(
+        "session.event",
+        createEvent(session.id, "system", "agent pty launch failed; falling back to piped process", {
+          backend: "node-pty",
+          command: program.command,
+          error: error instanceof Error ? error.message : String(error)
+        })
+      );
+    }
+
+    session.child = spawn(program.command, program.args, {
+      cwd: spec.cwd,
+      env: createSpawnEnv({
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor",
+        ...spec.env
+      }),
+      stdio: "pipe"
+    });
+    session.child.stdout?.on("data", (chunk) => {
+      this.handleChunk(session.id, "stdout", chunk.toString());
+    });
+    session.child.stderr?.on("data", (chunk) => {
+      this.handleChunk(session.id, "stderr", chunk.toString());
+    });
+    session.child.on("exit", (code, signal) => {
+      const current = this.sessions.get(session.id);
+      if (!current) {
+        return;
+      }
+      current.status = "stopped";
+      current.attention = "idle";
+      current.updatedAt = Date.now();
+      this.emit("session.event", createEvent(session.id, "status", "process exited", { code, signal }));
+      this.emitSessionUpdated(session.id);
+      this.emit("session.stopped", session.id);
+    });
+    this.emit("session.event", createEvent(session.id, "system", "agent backend: stdio", { backend: "stdio", command: program.command }));
   }
 
   private createTerminalRuntime(session: ManagedSession, spec: Extract<SessionSpec, { runtime: "terminal-session" }>): void {

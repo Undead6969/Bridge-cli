@@ -71,6 +71,16 @@ export function createApp(store = new BridgeStore()) {
     return store.exchangePairing(body.code, body.label);
   });
 
+  app.get("/auth/pairings/:code", async (request, reply) => {
+    const { code } = request.params as { code: string };
+    const pairing = store.getPairingStatus(code);
+    if (!pairing) {
+      reply.code(404);
+      return { message: "Pairing not found" };
+    }
+    return pairing;
+  });
+
   app.get("/machines", async () => store.listMachines());
 
   app.get("/machines/:machineId", async (request, reply) => {

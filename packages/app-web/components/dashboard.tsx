@@ -47,6 +47,25 @@ function runtimeLabel(session: SessionRecord): string {
   return session.runtime === "agent-session" ? session.agent ?? "agent" : "terminal";
 }
 
+function statusCopy(session: SessionRecord): string {
+  if (session.status === "running") {
+    return session.runtime === "terminal-session" ? "Live terminal attached" : "Agent is working";
+  }
+  if (session.status === "approval-needed") {
+    return "Needs your approval";
+  }
+  if (session.status === "blocked") {
+    return "Hit something cranky";
+  }
+  if (session.status === "completed") {
+    return "Finished and waiting for you";
+  }
+  if (session.status === "stopped") {
+    return "Stopped on the machine";
+  }
+  return "Getting ready";
+}
+
 export function Dashboard(props: DashboardProps) {
   const {
     machines,
@@ -198,6 +217,7 @@ export function Dashboard(props: DashboardProps) {
                 <span className="session-tag">{session.unreadCount} unread</span>
                 <span className="session-tag">{formatTime(session.lastEventAt)}</span>
               </div>
+              <div className="muted">{statusCopy(session)}</div>
             </button>
           ))}
         </div>
@@ -216,6 +236,10 @@ export function Dashboard(props: DashboardProps) {
             <span>Owner: {activeSession.owner}</span>
             <span>Attention: {activeSession.attention}</span>
             <span>{activeSession.runtime === "terminal-session" ? activeSession.terminalBackend ?? "pending" : runtimeLabel(activeSession)}</span>
+          </div>
+          <div className={`live-status live-status-${statusTone(activeSession.status)}`}>
+            <strong>{statusCopy(activeSession)}</strong>
+            <span>{activeSession.runtime === "terminal-session" ? "Phone terminal mode" : "Chat mode"} • {formatTime(activeSession.lastEventAt)}</span>
           </div>
           <div className={`transcript ${activeSession.runtime === "terminal-session" ? "terminal-transcript" : ""}`}>
             {sessionEvents.length === 0 ? (

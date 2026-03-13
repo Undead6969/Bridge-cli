@@ -26,6 +26,14 @@ type ManagedService = {
   started: boolean;
 };
 
+type PairingStatus = {
+  code: string;
+  label?: string;
+  expiresAt: number;
+  consumedAt?: number;
+  tokenLabel?: string;
+};
+
 function logServiceOutput(name: string, child: ChildProcess): void {
   child.stdout?.on("data", (chunk) => {
     process.stdout.write(`[${name}] ${chunk.toString()}`);
@@ -209,12 +217,36 @@ async function printPairing(label: string, options?: { useTunnel?: boolean; serv
   const pairingServerUrl =
     options?.serverUrl || process.env.BRIDGE_PUBLIC_SERVER_URL || !isLoopbackUrl(baseUrl) ? exposure.serverUrl : baseUrl;
   const sdk = new BridgeSdk(pairingServerUrl);
+  let lastConnectedCode: string | null = null;
+  let pollTimer: NodeJS.Timeout | null = null;
+
+  const startPairingPoll = (code: string) => {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+    }
+    pollTimer = setInterval(async () => {
+      try {
+        const response = await fetch(`${baseUrl}/auth/pairings/${code}`);
+        if (!response.ok) {
+          return;
+        }
+        const status = (await response.json()) as PairingStatus;
+        if (status.consumedAt && lastConnectedCode !== code) {
+          lastConnectedCode = code;
+          console.log(`Connected: ${status.tokenLabel ?? "a browser"} paired successfully. The app is alive, not just decorative.\n`);
+        }
+      } catch {
+        // If polling fails briefly, the QR should not have a full emotional breakdown.
+      }
+    }, 1200);
+  };
 
   const renderPairing = async () => {
     const pairing = await sdk.createPairing(label);
     const url = new URL(appUrl);
     url.searchParams.set("pairCode", pairing.code);
     url.searchParams.set("serverUrl", exposure.serverUrl);
+    lastConnectedCode = null;
     console.clear();
     qrcode.generate(url.toString(), { small: true });
     console.log(`\nCode: ${pairing.code}`);
@@ -223,6 +255,7 @@ async function printPairing(label: string, options?: { useTunnel?: boolean; serv
     if (process.stdin.isTTY) {
       console.log("Press r to refresh the QR/code, or Ctrl+C to quit.\n");
     }
+    startPairingPoll(pairing.code);
   };
 
   await renderPairing();
@@ -230,6 +263,10 @@ async function printPairing(label: string, options?: { useTunnel?: boolean; serv
   if (exposure.close) {
     console.log("Tunnel is active. Keep this process running while you use the web app.");
     const cleanup = () => {
+      if (pollTimer) {
+        clearInterval(pollTimer);
+        pollTimer = null;
+      }
       if (process.stdin.isTTY) {
         process.stdin.setRawMode(false);
       }

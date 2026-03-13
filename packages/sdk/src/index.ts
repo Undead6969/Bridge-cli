@@ -43,10 +43,17 @@ export class BridgeSdk {
     };
   }
 
+  private jsonHeaders(hasBody = true): Record<string, string> {
+    return {
+      ...(hasBody ? { "content-type": "application/json" } : {}),
+      ...this.headers()
+    };
+  }
+
   async createPairing(label?: string): Promise<{ code: string; expiresAt: number }> {
     const response = await fetch(`${this.baseUrl}/auth/pairings/request`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...this.headers() },
+      headers: this.jsonHeaders(true),
       body: JSON.stringify(pairingRequestSchema.parse({ label }))
     });
     return json(response, {
@@ -61,7 +68,7 @@ export class BridgeSdk {
   async exchangePairing(code: string, label?: string): Promise<AuthToken> {
     const response = await fetch(`${this.baseUrl}/auth/pairings/exchange`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...this.headers() },
+      headers: this.jsonHeaders(true),
       body: JSON.stringify(pairingCodeSchema.parse({ code, label }))
     });
     return json(response, authTokenSchema);
@@ -80,7 +87,7 @@ export class BridgeSdk {
   async updatePowerPolicy(machineId: string, policy: PowerPolicy): Promise<MachineRecord> {
     const response = await fetch(`${this.baseUrl}/machines/${machineId}/power-policy`, {
       method: "PUT",
-      headers: { "content-type": "application/json", ...this.headers() },
+      headers: this.jsonHeaders(true),
       body: JSON.stringify(powerPolicySchema.parse(policy))
     });
     return json(response, machineRecordSchema);
@@ -99,7 +106,7 @@ export class BridgeSdk {
   async createSession(machineId: string, spec: SessionSpec): Promise<SessionRecord> {
     const response = await fetch(`${this.baseUrl}/machines/${machineId}/sessions`, {
       method: "POST",
-      headers: { "content-type": "application/json", ...this.headers() },
+      headers: this.jsonHeaders(true),
       body: JSON.stringify(sessionSpecSchema.parse(spec))
     });
     return json(response, sessionRecordSchema);
