@@ -96,6 +96,33 @@ describe("server app", () => {
     expect(session.json().agent).toBe("codex");
   });
 
+  it("allows a pairing exchange to be retried without invalidating the code immediately", async () => {
+    const store = tempStore();
+    const { app } = createApp(store);
+
+    const pairing = await app.inject({
+      method: "POST",
+      url: "/auth/pairings/request",
+      payload: { label: "desktop" }
+    });
+    const code = pairing.json<{ code: string }>().code;
+
+    const firstExchange = await app.inject({
+      method: "POST",
+      url: "/auth/pairings/exchange",
+      payload: { code, label: "desktop" }
+    });
+    const secondExchange = await app.inject({
+      method: "POST",
+      url: "/auth/pairings/exchange",
+      payload: { code, label: "desktop" }
+    });
+
+    expect(firstExchange.statusCode).toBe(200);
+    expect(secondExchange.statusCode).toBe(200);
+    expect(secondExchange.json<{ token: string }>().token).toBe(firstExchange.json<{ token: string }>().token);
+  });
+
   it("persists session events and replays them by session", () => {
     const store = tempStore();
     store.addSessionEvent({

@@ -21,6 +21,7 @@ import { dirname, resolve } from "node:path";
 type PairingRecord = PairingCode & {
   expiresAt: number;
   consumedAt?: number;
+  token?: AuthToken;
 };
 
 type PersistedState = {
@@ -42,6 +43,7 @@ const defaultState: PersistedState = {
 };
 
 const MACHINE_STALE_MS = 35_000;
+const CONSUMED_PAIRING_GRACE_MS = 1000 * 60 * 10;
 
 function deriveOwner(startedBy: SessionSpec["startedBy"]): SessionRecord["owner"] {
   if (startedBy === "cli") {
@@ -84,7 +86,15 @@ export class BridgeStore {
 
   private prunePairings(): void {
     const now = Date.now();
-    this.state.pairings = this.state.pairings.filter((pairing) => pairing.expiresAt > now && !pairing.consumedAt);
+    this.state.pairings = this.state.pairings.filter((pairing) => {
+      if (pairing.expiresAt <= now && !pairing.consumedAt) {
+        return false;
+      }
+      if (!pairing.consumedAt) {
+        return true;
+      }
+      return pairing.consumedAt + CONSUMED_PAIRING_GRACE_MS > now;
+    });
   }
 
   private refreshMachineLiveness(): void {
@@ -335,6 +345,12 @@ export class BridgeStore {
     if (!pairing) {
       throw new Error("Invalid or expired pairing code");
     }
+    if (pairing.token) {
+      pairing.token.lastUsedAt = Date.now();
+      this.persist();
+      return pairing.token;
+    }
+
     pairing.consumedAt = Date.now();
     const token: AuthToken = {
       token: randomUUID(),
@@ -342,6 +358,7 @@ export class BridgeStore {
       createdAt: Date.now(),
       lastUsedAt: Date.now()
     };
+    pairing.token = token;
     this.state.authTokens.push(token);
     this.persist();
     return token;
