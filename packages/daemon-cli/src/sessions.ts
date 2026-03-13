@@ -97,6 +97,39 @@ function normalizeTerminalInput(data: string): string {
   return data.replace(/\r?\n/g, "\r");
 }
 
+function createPythonPtyProgram(cols: number, rows: number): string {
+  return [
+    "import fcntl, json, os, pty, select, signal, struct, sys, termios",
+    `cols=${cols}`,
+    `rows=${rows}`,
+    "argv = json.loads(os.environ['BRIDGE_ARGV'])",
+    "pid, fd = pty.fork()",
+    "if pid == 0:",
+    "    os.execvpe(argv[0], argv, os.environ)",
+    "else:",
+    "    def _winch(signum, frame):",
+    "        winsz = struct.pack('HHHH', rows, cols, 0, 0)",
+    "        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz)",
+    "    _winch(None, None)",
+    "    signal.signal(signal.SIGWINCH, _winch)",
+    "    while True:",
+    "        try:",
+    "            readers, _, _ = select.select([fd, sys.stdin.fileno()], [], [])",
+    "            if fd in readers:",
+    "                data = os.read(fd, 1024)",
+    "                if not data:",
+    "                    break",
+    "                os.write(sys.stdout.fileno(), data)",
+    "            if sys.stdin.fileno() in readers:",
+    "                data = os.read(sys.stdin.fileno(), 1024)",
+    "                if not data:",
+    "                    break",
+    "                os.write(fd, data)",
+    "        except OSError:",
+    "            break"
+  ].join("\n");
+}
+
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private sessions = new Map<string, ManagedSession>();
 
@@ -153,6 +186,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
 
   private createAgentRuntime(session: ManagedSession, spec: Extract<SessionSpec, { runtime: "agent-session" }>): void {
     const program = interactiveProgramForAgent(spec.agent);
+    const cols = 120;
+    const rows = 32;
     try {
       session.pty = spawnPty(program.command, program.args, {
         cwd: spec.cwd,
@@ -161,8 +196,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           COLORTERM: "truecolor",
           ...spec.env
         }),
-        cols: 120,
-        rows: 32,
+        cols,
+        rows,
         name: "xterm-256color"
       });
       session.terminalBackend = "node-pty";
@@ -186,7 +221,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     } catch (error) {
       this.emit(
         "session.event",
-        createEvent(session.id, "system", "agent pty launch failed; falling back to piped process", {
+        createEvent(session.id, "system", "agent pty launch failed; falling back to python pty", {
           backend: "node-pty",
           command: program.command,
           error: error instanceof Error ? error.message : String(error)
@@ -194,15 +229,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       );
     }
 
-    session.child = spawn(program.command, program.args, {
+    session.child = spawn("python3", ["-c", createPythonPtyProgram(cols, rows)], {
       cwd: spec.cwd,
       env: createSpawnEnv({
         TERM: "xterm-256color",
         COLORTERM: "truecolor",
-        ...spec.env
+        ...spec.env,
+        BRIDGE_ARGV: JSON.stringify([program.command, ...program.args])
       }),
       stdio: "pipe"
     });
+    session.terminalBackend = "python-pty";
     session.child.stdout?.on("data", (chunk) => {
       this.handleChunk(session.id, "stdout", chunk.toString());
     });
@@ -217,11 +254,11 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       current.status = "stopped";
       current.attention = "idle";
       current.updatedAt = Date.now();
-      this.emit("session.event", createEvent(session.id, "status", "process exited", { code, signal }));
+      this.emit("session.event", createEvent(session.id, "status", "process exited", { code, signal, backend: "python-pty" }));
       this.emitSessionUpdated(session.id);
       this.emit("session.stopped", session.id);
     });
-    this.emit("session.event", createEvent(session.id, "system", "agent backend: stdio", { backend: "stdio", command: program.command }));
+    this.emit("session.event", createEvent(session.id, "system", "agent backend: python-pty", { backend: "python-pty", command: program.command }));
   }
 
   private createTerminalRuntime(session: ManagedSession, spec: Extract<SessionSpec, { runtime: "terminal-session" }>): void {
@@ -265,19 +302,18 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       );
     }
 
+    const loginArgs = /(?:^|\/)(?:bash|zsh)$/.test(shell) ? ["-l"] : [];
     session.child = spawn(
         "python3",
         [
           "-c",
-          "import fcntl, os, pty, select, signal, struct, sys, termios; cols=int(os.environ.get('BRIDGE_COLS','120')); rows=int(os.environ.get('BRIDGE_ROWS','32')); shell=os.environ.get('BRIDGE_SHELL','/bin/sh'); argv=[shell, '-l'] if os.path.basename(shell) in {'bash','zsh'} else [shell]; pid, fd = pty.fork();\nif pid == 0:\n    os.execvpe(argv[0], argv, os.environ)\nelse:\n    def _winch(signum, frame):\n        winsz = struct.pack('HHHH', rows, cols, 0, 0)\n        fcntl.ioctl(fd, termios.TIOCSWINSZ, winsz)\n    _winch(None, None)\n    signal.signal(signal.SIGWINCH, _winch)\n    while True:\n        try:\n            readers, _, _ = select.select([fd, sys.stdin.fileno()], [], [])\n            if fd in readers:\n                data = os.read(fd, 1024)\n                if not data:\n                    break\n                os.write(sys.stdout.fileno(), data)\n            if sys.stdin.fileno() in readers:\n                data = os.read(sys.stdin.fileno(), 1024)\n                if not data:\n                    break\n                os.write(fd, data)\n        except OSError:\n            break"
+          createPythonPtyProgram(120, 32)
         ],
       {
         cwd: spec.cwd,
         env: createSpawnEnv({
           ...spec.env,
-          BRIDGE_SHELL: shell,
-          BRIDGE_COLS: "120",
-          BRIDGE_ROWS: "32"
+          BRIDGE_ARGV: JSON.stringify([shell, ...loginArgs])
         }),
         stdio: "pipe"
       }
