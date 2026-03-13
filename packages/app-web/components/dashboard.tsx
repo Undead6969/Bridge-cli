@@ -367,71 +367,113 @@ export function Dashboard(props: DashboardProps) {
   const transcriptCards = activeSession ? sessionEvents.map((event) => ({ event, card: parseEventCard(event) })) : [];
   const terminalText = activeSession?.runtime === "terminal-session" ? terminalBuffer(sessionEvents) : "";
   const activeWorkspace = workspaceHeadline(selectedWorkspace, workspaceOptions);
+  const codexHandshakeReady = Boolean(
+    activeSession?.agent === "codex" &&
+      sessionEvents.some((event) => event.kind === "system" && /agent backend:/i.test(event.data))
+  );
+  const blockedByRuntime = Boolean(
+    activeSession &&
+      (["blocked", "errored", "stopped", "offline"].includes(activeSession.status) ||
+        sessionEvents.some((event) => /TERM is set to "dumb"|Refusing to start the interactive TUI/i.test(event.data)))
+  );
+  const chatReady = Boolean(
+    activeSession &&
+      !blockedByRuntime &&
+      (activeSession.runtime === "terminal-session"
+        ? ["running", "waiting"].includes(activeSession.status)
+        : activeSession.agent === "codex"
+          ? codexHandshakeReady && ["running", "waiting", "completed"].includes(activeSession.status)
+          : ["running", "waiting", "completed"].includes(activeSession.status))
+  );
+  const connectionLabel = !activeSession
+    ? "Pick a chat to begin."
+    : blockedByRuntime
+      ? "Codex hit a runtime problem. Start a fresh session."
+      : !chatReady
+        ? activeSession.agent === "codex"
+          ? "Waiting for Codex to finish handshaking..."
+          : "Waiting for session to become interactive..."
+        : activeSession.runtime === "terminal-session"
+          ? "Terminal is live."
+          : `${displayRuntime(activeSession)} is connected.`;
 
   return (
-    <section className={`messenger-shell ${mobilePane === "chat" ? "messenger-mobile-chat" : ""} ${settingsOpen ? "messenger-settings-open" : ""}`}>
-      <div className="messenger-layout">
-        <aside className="chat-sidebar">
-          <div className="sidebar-brand">
-            <div className="brand-mark">B</div>
-            <div className="sidebar-brand-copy">
-              <strong>Bridge</strong>
-              <span>Remote coding</span>
+    <section className={`codex-shell ${mobilePane === "chat" ? "codex-shell-mobile-chat" : ""}`}>
+      <div className="codex-layout">
+        <aside className="codex-sidebar">
+          <div className="codex-sidebar-top">
+            <div className="codex-brand">
+              <div className="brand-mark">B</div>
+              <div>
+                <strong>Bridge</strong>
+                <span>Remote coding</span>
+              </div>
             </div>
-          </div>
-
-          <div className="sidebar-top">
-            <div>
-              <div className="sidebar-title">Your chats</div>
-              <div className="sidebar-subtitle">{activeWorkspace?.detail ?? "All workspaces"}</div>
-            </div>
-            <button className="sidebar-action-button" onClick={onShowPairing} type="button">
-              New
+            <button className="codex-sidebar-icon" onClick={onShowPairing} type="button" aria-label="Pair browser">
+              +
             </button>
           </div>
 
-          <div className="sidebar-summary-pills">
-            <span className="sidebar-pill">{machines.filter((machine) => machine.online).length} online</span>
-            <span className="sidebar-pill">{unreadCount} unread</span>
-            <span className={`sidebar-pill ${hasActiveApprovals ? "sidebar-pill-alert" : ""}`}>
-              {hasActiveApprovals ? "approval needed" : "no approvals"}
-            </span>
+          <div className="codex-sidebar-actions">
+            <button className="codex-sidebar-action" onClick={() => activeMachine && onLaunchSession(activeMachine.machineId, "codex")} type="button" disabled={!activeMachine}>
+              New chat
+            </button>
+            <button className="codex-sidebar-action codex-sidebar-action-secondary" onClick={onToggleSettings} type="button">
+              Settings
+            </button>
           </div>
 
-          <div className="chat-groups">
+          <div className="codex-sidebar-section">
+            <div className="codex-sidebar-heading">Your chats</div>
+            <label className="codex-sidebar-label" htmlFor="workspace-select">
+              Workspace
+            </label>
+            <select id="workspace-select" className="codex-workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
+              {workspaceOptions.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.label}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <div className="codex-sidebar-section codex-sidebar-stats">
+            <span>{machines.filter((machine) => machine.online).length} online</span>
+            <span>{unreadCount} unread</span>
+            <span>{hasActiveApprovals ? "approval needed" : "quiet for now"}</span>
+          </div>
+
+          <div className="codex-thread-list">
             {groupedSessions.length === 0 ? (
-              <div className="empty-chats">
-                <strong>No sessions yet</strong>
-                <span>Launch Codex, Claude, Gemini, or a terminal from the active machine.</span>
+              <div className="codex-empty-sidebar">
+                <strong>No chats yet</strong>
+                <span>Launch Codex from the sidebar and the thread list will wake up.</span>
               </div>
             ) : (
               groupedSessions.map(([group, items]) => (
-                <div key={group} className="chat-group">
-                  <div className="chat-group-label">{group}</div>
+                <div key={group} className="codex-thread-group">
+                  <div className="codex-thread-group-title">{group}</div>
                   {items.map((session) => {
                     const machine = machines.find((item) => item.machineId === session.machineId);
                     return (
                       <button
                         key={session.id}
-                        className={`chat-list-item ${activeSession?.id === session.id ? "chat-list-item-active" : ""}`}
+                        className={`codex-thread-item ${activeSession?.id === session.id ? "codex-thread-item-active" : ""}`}
                         onClick={() => onSelectSession(session.id)}
                         type="button"
                       >
-                        <div className="chat-avatar" style={{ backgroundColor: avatarSeed(session.title) }}>
+                        <div className="codex-thread-avatar" style={{ backgroundColor: avatarSeed(session.title) }}>
                           {displayRuntime(session).slice(0, 1)}
                         </div>
-                        <div className="chat-copy">
-                          <div className="chat-copy-top">
+                        <div className="codex-thread-copy">
+                          <div className="codex-thread-title-row">
                             <strong>{session.title}</strong>
                             <span>{formatTime(session.lastEventAt)}</span>
                           </div>
-                          <div className="chat-copy-middle">
-                            <span>{machine?.hostname ?? "machine"}</span>
-                            <span className={`session-dot dot-${sessionTone(session)}`}>{sessionStatusCopy(session)}</span>
-                          </div>
-                          <div className="chat-copy-bottom">{sessionPreview(session, sessionEvents)}</div>
+                          <div className="codex-thread-subtitle">{machine?.hostname ?? "machine"} • {sessionStatusCopy(session)}</div>
+                          <div className="codex-thread-preview">{sessionPreview(session, sessionEvents)}</div>
                         </div>
-                        {session.unreadCount > 0 ? <div className="unread-badge">{session.unreadCount}</div> : null}
+                        {session.unreadCount > 0 ? <span className="codex-thread-badge">{session.unreadCount}</span> : null}
                       </button>
                     );
                   })}
@@ -439,104 +481,73 @@ export function Dashboard(props: DashboardProps) {
               ))
             )}
           </div>
+
+          <div className="codex-sidebar-footer">
+            <div className="codex-sidebar-footer-title">Quick launch</div>
+            <div className="codex-runtime-list">
+              <button className="codex-runtime-button" disabled={!activeMachine} onClick={() => activeMachine && onLaunchSession(activeMachine.machineId, "codex")} type="button">Codex</button>
+              <button className="codex-runtime-button" disabled={!activeMachine?.capabilities.cli.claude.launchable} onClick={() => activeMachine && onLaunchSession(activeMachine.machineId, "claude")} type="button">Claude</button>
+              <button className="codex-runtime-button" disabled={!activeMachine?.capabilities.cli.gemini.launchable} onClick={() => activeMachine && onLaunchSession(activeMachine.machineId, "gemini")} type="button">Gemini</button>
+              <button className="codex-runtime-button" disabled={!activeMachine?.capabilities.terminal.supportsInteractivePty} onClick={() => activeMachine && onLaunchSession(activeMachine.machineId, "terminal")} type="button">Terminal</button>
+            </div>
+          </div>
         </aside>
 
-        <main className="chat-main">
+        <main className="codex-main">
           {activeSession ? (
             <>
-              <header className="chat-header">
-                <div className="chat-header-left">
-                  <button className="mobile-back-button" onClick={onBackToSessions} type="button" aria-label="Back to sessions">
-                    ←
-                  </button>
-                  <div>
-                    <div className="chat-header-kicker">{displayRuntime(activeSession)}</div>
-                    <div className="chat-header-title">{activeSession.title}</div>
-                    <div className="chat-header-subtitle">
-                      {activeMachine?.hostname ?? "machine"} • {activeWorkspace?.label ?? "workspace"} • {sessionStatusCopy(activeSession)}
-                    </div>
+              <header className="codex-main-header">
+                <button className="mobile-back-button" onClick={onBackToSessions} type="button" aria-label="Back to sessions">
+                  ←
+                </button>
+                <div className="codex-main-header-copy">
+                  <div className="codex-main-kicker">{displayRuntime(activeSession)}</div>
+                  <div className="codex-main-title">{activeSession.title}</div>
+                  <div className="codex-main-subtitle">
+                    {activeMachine?.hostname ?? "machine"} • {activeWorkspace?.label ?? "workspace"} • {sessionStatusCopy(activeSession)}
                   </div>
                 </div>
-                <div className="chat-header-right">
-                  <div className="workspace-header-chip chat-header-chip">
-                    <span className="workspace-header-label">Workspace</span>
-                    <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
-                      {workspaceOptions.map((workspace) => (
-                        <option key={workspace.id} value={workspace.id}>
-                          {workspace.label}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <button className="header-icon-button compact-button" onClick={onShowPairing} type="button">Pair</button>
-                  <button className="header-icon-button compact-button" onClick={onToggleSettings} type="button">⋯</button>
-                </div>
+                <div className={`codex-connection-pill ${chatReady ? "codex-connection-pill-live" : ""}`}>{connectionLabel}</div>
               </header>
 
-              <section className="chat-launch-strip">
-                {activeMachine ? (
-                  <>
-                    <div className="chat-launch-copy">
-                      <strong>{activeMachine.hostname}</strong>
-                      <span>Switch runtimes without leaving the conversation.</span>
-                    </div>
-                    <div className="launch-chip-row">
-                      <button className="launch-chip launch-chip-primary" onClick={() => onLaunchSession(activeMachine.machineId, "codex")} type="button">Codex</button>
-                      <button className="launch-chip" disabled={!activeMachine.capabilities.cli.claude.launchable} onClick={() => onLaunchSession(activeMachine.machineId, "claude")} type="button">Claude</button>
-                      <button className="launch-chip" disabled={!activeMachine.capabilities.cli.gemini.launchable} onClick={() => onLaunchSession(activeMachine.machineId, "gemini")} type="button">Gemini</button>
-                      <button className="launch-chip" disabled={!activeMachine.capabilities.terminal.supportsInteractivePty} onClick={() => onLaunchSession(activeMachine.machineId, "terminal")} type="button">Terminal</button>
-                    </div>
-                  </>
-                ) : null}
-              </section>
-
-              <section className={`chat-transcript ${activeSession.runtime === "terminal-session" ? "chat-transcript-terminal" : ""}`}>
+              <section className={`codex-transcript ${activeSession.runtime === "terminal-session" ? "codex-transcript-terminal" : ""}`}>
                 {activeSession.runtime === "terminal-session" ? (
-                  <div className="terminal-shell transcript-lane">
-                    <div className="terminal-shell-header">
-                      <span className="terminal-dot terminal-red" />
-                      <span className="terminal-dot terminal-yellow" />
-                      <span className="terminal-dot terminal-green" />
-                      <strong>{activeSession.shell ?? "shell"}</strong>
-                    </div>
-                    <pre className="terminal-screen">{terminalText || "Waiting for terminal output..."}</pre>
+                  <div className="codex-terminal transcript-lane">
+                    <div className="codex-terminal-bar">{activeSession.shell ?? "shell"}</div>
+                    <pre className="codex-terminal-screen">{terminalText || "Waiting for terminal output..."}</pre>
                   </div>
                 ) : sessionEvents.length === 0 ? (
-                  <div className="empty-chat-stage chat-empty-state">
-                    <strong>Ready when you are.</strong>
-                    <span>Send a message to {displayRuntime(activeSession)} and Bridge will keep the session synced across devices.</span>
+                  <div className="codex-empty-state">
+                    <h2>Ready when you are.</h2>
+                    <p>{chatReady ? "Send a message and Bridge will forward it to the live Codex session." : connectionLabel}</p>
                   </div>
                 ) : (
                   transcriptCards.map(({ event, card }) => {
                     const isUser = event.kind === "input";
                     if (card.type === "approval") {
                       return (
-                        <article key={event.id} className="message-card message-card-approval transcript-lane">
-                          <div className="message-card-top">
-                            <span className="message-card-icon">!</span>
+                        <article key={event.id} className="codex-event-card codex-event-card-approval transcript-lane">
+                          <div className="codex-event-card-top">
+                            <span className="codex-event-dot">!</span>
                             <div>
                               <strong>{card.title}</strong>
-                              <div className="message-card-meta">{card.meta}</div>
+                              <div className="codex-event-meta">{card.meta}</div>
                             </div>
                           </div>
                           <p>{card.body}</p>
-                          <div className="message-card-actions">
-                            <button className="mini-action">Approve in terminal</button>
-                            <button className="mini-action ghost-button">Review first</button>
-                          </div>
                         </article>
                       );
                     }
                     if (card.type === "tool" || card.type === "command" || card.type === "file" || card.type === "status") {
                       return (
-                        <article key={event.id} className={`message-card message-card-${card.type} transcript-lane`}>
-                          <div className="message-card-top">
-                            <span className="message-card-icon">
+                        <article key={event.id} className={`codex-event-card codex-event-card-${card.type} transcript-lane`}>
+                          <div className="codex-event-card-top">
+                            <span className="codex-event-dot">
                               {card.type === "tool" ? "◉" : card.type === "command" ? ">" : card.type === "file" ? "#" : "•"}
                             </span>
                             <div>
                               <strong>{card.title}</strong>
-                              <div className="message-card-meta">{card.meta ?? formatTime(event.at)}</div>
+                              <div className="codex-event-meta">{card.meta ?? formatTime(event.at)}</div>
                             </div>
                           </div>
                           <p>{card.body}</p>
@@ -544,49 +555,48 @@ export function Dashboard(props: DashboardProps) {
                       );
                     }
                     return (
-                      <article key={event.id} className={`message-bubble ${isUser ? "message-user" : "message-default"} transcript-lane`}>
-                        <div className="message-kind">{isUser ? "You" : displayRuntime(activeSession)}</div>
+                      <article key={event.id} className={`codex-bubble ${isUser ? "codex-bubble-user" : "codex-bubble-agent"} transcript-lane`}>
+                        <div className="codex-bubble-role">{isUser ? "You" : displayRuntime(activeSession)}</div>
                         <pre>{event.data}</pre>
-                        <div className="message-meta">{formatTime(event.at)}</div>
+                        <div className="codex-bubble-time">{formatTime(event.at)}</div>
                       </article>
                     );
                   })
                 )}
                 {thinking && activeSession.runtime !== "terminal-session" ? (
-                  <div className="thinking-block transcript-lane">
-                    <div className="thinking-avatar">{displayRuntime(activeSession).slice(0, 1)}</div>
-                    <div className="thinking-card">
-                      <div className="thinking-label">{displayRuntime(activeSession)} is thinking</div>
-                      <div className="thinking-dots">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
-                      <div className="thinking-lines">
-                        <span />
-                        <span />
-                        <span />
-                      </div>
+                  <div className="codex-thinking transcript-lane">
+                    <div className="codex-thinking-label">{displayRuntime(activeSession)} is thinking</div>
+                    <div className="codex-thinking-dots">
+                      <span />
+                      <span />
+                      <span />
                     </div>
                   </div>
                 ) : null}
               </section>
 
-              <footer className="chat-composer">
+              <footer className="codex-composer-wrap">
                 <PromptBox
-                  className="chat-promptbox"
+                  className="codex-promptbox"
                   mode={activeSession.runtime === "terminal-session" ? "terminal" : "chat"}
                   value={composer}
                   onValueChange={onComposerChange}
                   onSubmit={onSendInput}
-                  placeholder={activeSession.runtime === "terminal-session" ? "Type terminal input..." : "Message this session..."}
+                  disabled={!chatReady}
+                  placeholder={
+                    activeSession.runtime === "terminal-session"
+                      ? "Type terminal input..."
+                      : chatReady
+                        ? "Ask Codex anything"
+                        : connectionLabel
+                  }
                 />
               </footer>
             </>
           ) : (
-            <div className="empty-chat-stage chat-empty-state">
-              <strong>Ready when you are.</strong>
-              <span>Pick a chat on the left, or start a new Codex, Claude, Gemini, or Terminal session.</span>
+            <div className="codex-empty-state codex-empty-state-full">
+              <h2>Ready when you are.</h2>
+              <p>Pick a chat on the left or start a fresh Codex session.</p>
             </div>
           )}
         </main>
