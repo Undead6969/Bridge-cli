@@ -13,6 +13,9 @@
     "incremental": true,
     "baseUrl": ".",
     "paths": {
+      "@/*": [
+        "./*"
+      ],
       "@bridge/protocol": [
         "../protocol/src/index.ts"
       ]

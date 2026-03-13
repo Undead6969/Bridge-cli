@@ -1,5 +1,6 @@
 import React from "react";
 import type { InboxItem, MachineRecord, SessionRecord, SessionStreamEvent } from "@bridge/protocol";
+import { PromptBox } from "@/components/ui/chatgpt-prompt-input";
 
 type ThemeMode = "dark" | "light";
 
@@ -271,6 +272,10 @@ function terminalBuffer(events: SessionStreamEvent[]): string {
     .trim();
 }
 
+function workspaceHeadline(selectedWorkspace: string, options: WorkspaceOption[]): WorkspaceOption | undefined {
+  return options.find((item) => item.id === selectedWorkspace) ?? options[0];
+}
+
 export function Dashboard(props: DashboardProps) {
   const {
     machines,
@@ -361,6 +366,7 @@ export function Dashboard(props: DashboardProps) {
   const thinking = Boolean(activeSession && (activeSession.status === "running" || activeSession.status === "starting") && composer.trim().length === 0);
   const transcriptCards = activeSession ? sessionEvents.map((event) => ({ event, card: parseEventCard(event) })) : [];
   const terminalText = activeSession?.runtime === "terminal-session" ? terminalBuffer(sessionEvents) : "";
+  const activeWorkspace = workspaceHeadline(selectedWorkspace, workspaceOptions);
 
   return (
     <section className={`messenger-shell ${mobilePane === "chat" ? "messenger-mobile-chat" : ""} ${settingsOpen ? "messenger-settings-open" : ""}`}>
@@ -373,13 +379,16 @@ export function Dashboard(props: DashboardProps) {
           </div>
         </div>
         <div className="header-actions">
-          <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
-            {workspaceOptions.map((workspace) => (
-              <option key={workspace.id} value={workspace.id}>
-                {workspace.label}
-              </option>
-            ))}
-          </select>
+          <div className="workspace-header-chip">
+            <span className="workspace-header-label">Workspace</span>
+            <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
+              {workspaceOptions.map((workspace) => (
+                <option key={workspace.id} value={workspace.id}>
+                  {workspace.label}
+                </option>
+              ))}
+            </select>
+          </div>
           <button className="header-icon-button" onClick={onShowPairing} type="button" aria-label="Show pairing controls">
             Pair
           </button>
@@ -394,7 +403,7 @@ export function Dashboard(props: DashboardProps) {
           <div className="sidebar-top">
             <div>
               <div className="sidebar-title">Sessions</div>
-              <div className="sidebar-subtitle">{workspaceOptions.find((item) => item.id === selectedWorkspace)?.detail ?? "All workspaces"}</div>
+              <div className="sidebar-subtitle">{activeWorkspace?.detail ?? "All workspaces"}</div>
             </div>
             <button className="header-icon-button compact-button" onClick={onShowPairing} type="button">
               +
@@ -462,6 +471,19 @@ export function Dashboard(props: DashboardProps) {
         <main className="chat-main">
           {activeSession ? (
             <>
+              <div className="chat-connection-banner">
+                <div>
+                  <strong>{activeMachine?.online ? "Connected" : "Waiting on machine"}</strong>
+                  <span>
+                    {activeMachine?.hostname ?? "machine"} • {activeWorkspace?.label ?? "workspace"} • {activeSession.runtime === "terminal-session" ? "terminal session" : "agent chat"}
+                  </span>
+                </div>
+                <div className="chat-connection-state">
+                  <span className={`session-dot dot-${sessionTone(activeSession)}`}>{sessionStatusCopy(activeSession)}</span>
+                  <span className="header-meta-pill">{activeSession.owner}</span>
+                </div>
+              </div>
+
               <header className="chat-header">
                 <div className="chat-header-left">
                   <button className="mobile-back-button" onClick={onBackToSessions} type="button" aria-label="Back to sessions">
@@ -581,16 +603,14 @@ export function Dashboard(props: DashboardProps) {
               </section>
 
               <footer className="chat-composer">
-                <div className="composer-frame">
-                  <input
-                    value={composer}
-                    onChange={(event) => onComposerChange(event.target.value)}
-                    placeholder={activeSession.runtime === "terminal-session" ? "Type terminal input..." : "Message this session..."}
-                  />
-                  <button className="composer-send" onClick={onSendInput} type="button">
-                    Send
-                  </button>
-                </div>
+                <PromptBox
+                  className="chat-promptbox"
+                  mode={activeSession.runtime === "terminal-session" ? "terminal" : "chat"}
+                  value={composer}
+                  onValueChange={onComposerChange}
+                  onSubmit={onSendInput}
+                  placeholder={activeSession.runtime === "terminal-session" ? "Type terminal input..." : "Message this session..."}
+                />
               </footer>
             </>
           ) : (
