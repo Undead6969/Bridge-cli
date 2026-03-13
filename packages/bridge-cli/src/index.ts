@@ -208,21 +208,49 @@ async function printPairing(label: string, options?: { useTunnel?: boolean; serv
   const exposure = await resolvePublicServerUrl(options);
   const pairingServerUrl =
     options?.serverUrl || process.env.BRIDGE_PUBLIC_SERVER_URL || !isLoopbackUrl(baseUrl) ? exposure.serverUrl : baseUrl;
-  const pairing = await new BridgeSdk(pairingServerUrl).createPairing(label);
-  const url = new URL(appUrl);
-  url.searchParams.set("pairCode", pairing.code);
-  url.searchParams.set("serverUrl", exposure.serverUrl);
-  qrcode.generate(url.toString(), { small: true });
-  console.log(`\nCode: ${pairing.code}`);
-  console.log(`Server: ${exposure.serverUrl}`);
-  console.log(`Open: ${url.toString()}\n`);
+  const sdk = new BridgeSdk(pairingServerUrl);
+
+  const renderPairing = async () => {
+    const pairing = await sdk.createPairing(label);
+    const url = new URL(appUrl);
+    url.searchParams.set("pairCode", pairing.code);
+    url.searchParams.set("serverUrl", exposure.serverUrl);
+    console.clear();
+    qrcode.generate(url.toString(), { small: true });
+    console.log(`\nCode: ${pairing.code}`);
+    console.log(`Server: ${exposure.serverUrl}`);
+    console.log(`Open: ${url.toString()}\n`);
+    if (process.stdin.isTTY) {
+      console.log("Press r to refresh the QR/code, or Ctrl+C to quit.\n");
+    }
+  };
+
+  await renderPairing();
 
   if (exposure.close) {
     console.log("Tunnel is active. Keep this process running while you use the web app.");
     const cleanup = () => {
+      if (process.stdin.isTTY) {
+        process.stdin.setRawMode(false);
+      }
+      process.stdin.pause();
       exposure.close?.();
       process.exit(0);
     };
+    if (process.stdin.isTTY) {
+      process.stdin.setRawMode(true);
+      process.stdin.resume();
+      process.stdin.on("data", async (chunk) => {
+        const key = chunk.toString().toLowerCase();
+        if (key === "r") {
+          await renderPairing();
+          return;
+        }
+        if (key === "\u0003" || key === "q") {
+          cleanup();
+        }
+      });
+    }
     process.on("SIGINT", cleanup);
     process.on("SIGTERM", cleanup);
     await new Promise(() => undefined);
