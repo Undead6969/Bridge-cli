@@ -70,7 +70,7 @@ function spawnWorkspaceCommand(name: "server" | "daemon"): ChildProcess {
     return child;
   }
 
-  const filter = name === "server" ? "@bridge/server" : "bridge-daemon";
+  const filter = name === "server" ? "@bridge/server" : "@bridge/daemon";
   const child = spawn("corepack", ["pnpm", "--filter", filter, "dev"], {
     cwd: bridgeRoot,
     env: process.env,

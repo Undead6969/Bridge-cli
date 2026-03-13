@@ -6,6 +6,7 @@
   "scripts": {
     "build": "corepack pnpm -r build",
     "dev": "corepack pnpm --filter @bridge/app-web dev",
+    "install:global": "./scripts/install-global.sh",
     "lint": "corepack pnpm -r lint",
     "test": "corepack pnpm -r test",
     "typecheck": "corepack pnpm -r typecheck"

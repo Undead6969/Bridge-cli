@@ -57,10 +57,8 @@ If you are working from this repo:
 
 ```bash
 pnpm install
-pnpm build
-pnpm --filter @bridge/server dev
-pnpm --filter bridge-daemon dev
-pnpm --filter bridge-cli exec bridge
+pnpm run install:global
+bridge
 ```
 
 That will:
@@ -263,3 +261,21 @@ Still worth improving:
 LocalTunnel websocket support reference:
 
 - [https://github.com/localtunnel/localtunnel#readme](https://github.com/localtunnel/localtunnel#readme)
+
+## Global Install From Source
+
+If you want the short commands from this checkout without publishing to npm:
+
+```bash
+npm uninstall -g bridge-cli
+pnpm run install:global
+bridge
+```
+
+That gives you:
+
+- `bridge`
+- `bridge-daemon`
+- `bridge-server`
+
+The `npm uninstall -g bridge-cli` line removes the unrelated public package that commonly hijacks the `bridge` command.

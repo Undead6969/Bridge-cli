@@ -1,14 +1,14 @@
 {
-  "name": "bridge-cli",
+  "name": "@bridge/cli",
   "version": "0.1.0",
   "type": "module",
   "bin": {
-    "bridge": "dist/index.js"
+    "bridge": "dist/bridge-cli/src/index.js"
   },
-  "main": "src/index.ts",
-  "types": "src/index.ts",
+  "main": "dist/bridge-cli/src/index.js",
+  "types": "dist/bridge-cli/src/index.d.ts",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./dist/bridge-cli/src/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
