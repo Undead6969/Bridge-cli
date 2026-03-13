@@ -103,11 +103,15 @@ export function ClientApp({
     if (serverUrl) {
       setServerBaseUrl(serverUrl);
       window.localStorage.setItem(serverUrlKey, serverUrl);
+      if (storedServerUrl && storedServerUrl !== serverUrl) {
+        window.localStorage.removeItem(tokenKey);
+        setToken(null);
+      }
     }
   }, []);
 
   useEffect(() => {
-    if (!exchangeCode || token || isPairing || !serverBaseUrl) {
+    if (!exchangeCode || isPairing || !serverBaseUrl) {
       return;
     }
 
@@ -125,6 +129,7 @@ export function ClientApp({
           body: JSON.stringify({ code: exchangeCode, label: "web-client" })
         });
         setToken(payload.token);
+        window.localStorage.setItem(tokenKey, payload.token);
         setError("");
         setPairingMessage("Browser paired. You are now legally allowed to feel powerful.");
         params.delete("pairCode");
@@ -140,7 +145,7 @@ export function ClientApp({
     };
 
     void pairFromLink();
-  }, [exchangeCode, isPairing, serverBaseUrl, token]);
+  }, [exchangeCode, isPairing, serverBaseUrl]);
 
   useEffect(() => {
     if (!token || !serverBaseUrl) {
@@ -167,7 +172,13 @@ export function ClientApp({
         setActiveSessionId((current) => current ?? sessionData[0]?.id ?? null);
       } catch (loadError) {
         if (!cancelled) {
-          setError(loadError instanceof Error ? loadError.message : "Failed to load data");
+          const message = loadError instanceof Error ? loadError.message : "Failed to load data";
+          setError(message);
+          if (/401|unauthorized/i.test(message)) {
+            window.localStorage.removeItem(tokenKey);
+            setToken(null);
+            setPairingMessage("That browser session expired. Pair again with the latest code.");
+          }
         }
       }
     };
@@ -311,6 +322,7 @@ export function ClientApp({
         body: JSON.stringify({ code: exchangeCode, label: "web-client" })
       });
       setToken(payload.token);
+      window.localStorage.setItem(tokenKey, payload.token);
       setError("");
       setPairingMessage("Browser paired and ready.");
     } catch (exchangeError) {
