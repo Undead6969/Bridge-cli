@@ -8,6 +8,9 @@ import { Dashboard } from "./dashboard";
 const tokenKey = "bridge-auth-token";
 const serverUrlKey = "bridge-server-url";
 const notificationsKey = "bridge-notifications-enabled";
+const themeKey = "bridge-theme";
+
+type ThemeMode = "dark" | "light";
 
 function requiresTunnelBypass(baseUrl: string): boolean {
   return /\.loca\.lt$/i.test(new URL(baseUrl).hostname);
@@ -64,6 +67,22 @@ function websocketUrl(baseUrl: string, token: string): string {
   return url.toString();
 }
 
+function workspaceFromSession(session?: SessionRecord | null): string {
+  return session?.cwd ?? "all";
+}
+
+function workspaceLabel(pathname: string): string {
+  const parts = pathname.split("/").filter(Boolean);
+  return parts[parts.length - 1] ?? pathname;
+}
+
+function applyTheme(theme: ThemeMode): void {
+  if (typeof document === "undefined") {
+    return;
+  }
+  document.documentElement.dataset.theme = theme;
+}
+
 export function ClientApp({
   fallbackMachines,
   fallbackSessions
@@ -82,17 +101,18 @@ export function ClientApp({
   const [isPairing, setIsPairing] = useState(false);
   const [pairingMessage, setPairingMessage] = useState("Scan the QR or type the 6-digit code.");
   const [serverBaseUrl, setServerBaseUrl] = useState(process.env.NEXT_PUBLIC_BRIDGE_SERVER_URL ?? "");
-  const [activeTab, setActiveTab] = useState<"home" | "sessions" | "inbox" | "settings">("home");
-  const [selectedMachineId, setSelectedMachineId] = useState<string | null>(fallbackMachines[0]?.machineId ?? null);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(fallbackSessions[0]?.id ?? null);
   const [sessionEvents, setSessionEvents] = useState<SessionStreamEvent[]>([]);
   const [composer, setComposer] = useState("");
   const [notificationsEnabled, setNotificationsEnabled] = useState(false);
   const [reconnectHint, setReconnectHint] = useState("");
   const [connectedSince, setConnectedSince] = useState<number | null>(null);
+  const [hasLoadedRemoteData, setHasLoadedRemoteData] = useState(false);
+  const [showPairingPanel, setShowPairingPanel] = useState(false);
+  const [theme, setTheme] = useState<ThemeMode>("dark");
+  const [selectedWorkspace, setSelectedWorkspace] = useState("all");
   const socketRef = useRef<WebSocket | null>(null);
   const seenInboxIds = useRef<Set<string>>(new Set());
-  const hadLoadedRemoteData = useRef(false);
 
   const hostedAppOrigin = useMemo(() => {
     const publicUrl = process.env.NEXT_PUBLIC_BRIDGE_APP_URL;
@@ -114,20 +134,31 @@ export function ClientApp({
     const storedServerUrl = window.localStorage.getItem(serverUrlKey);
     const storedToken = window.localStorage.getItem(tokenKey);
     const storedNotifications = window.localStorage.getItem(notificationsKey);
+    const storedTheme = window.localStorage.getItem(themeKey) as ThemeMode | null;
     if (storedToken) {
       setToken(storedToken);
       setConnectedSince(Date.now());
+      setShowPairingPanel(false);
     }
     if (storedServerUrl) {
       setServerBaseUrl(storedServerUrl);
     }
-    setNotificationsEnabled(storedNotifications === "true");
+    if (storedNotifications === "true") {
+      setNotificationsEnabled(true);
+    }
+    if (storedTheme === "light" || storedTheme === "dark") {
+      setTheme(storedTheme);
+      applyTheme(storedTheme);
+    } else {
+      applyTheme("dark");
+    }
 
     const params = new URLSearchParams(window.location.search);
     const pairCode = params.get("pairCode");
     const serverUrl = params.get("serverUrl");
     if (pairCode) {
       setExchangeCode(pairCode);
+      setShowPairingPanel(true);
     }
     if (serverUrl) {
       setServerBaseUrl(serverUrl);
@@ -135,15 +166,24 @@ export function ClientApp({
       if (storedServerUrl && storedServerUrl !== serverUrl) {
         window.localStorage.removeItem(tokenKey);
         setToken(null);
+        setConnectedSince(null);
       }
     }
   }, []);
 
   useEffect(() => {
+    window.localStorage.setItem(notificationsKey, notificationsEnabled ? "true" : "false");
+  }, [notificationsEnabled]);
+
+  useEffect(() => {
+    window.localStorage.setItem(themeKey, theme);
+    applyTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
     if (!exchangeCode || isPairing || !serverBaseUrl) {
       return;
     }
-
     const params = new URLSearchParams(window.location.search);
     if (!params.get("pairCode")) {
       return;
@@ -159,9 +199,10 @@ export function ClientApp({
         });
         setToken(payload.token);
         setConnectedSince(Date.now());
+        setHasLoadedRemoteData(false);
         window.localStorage.setItem(tokenKey, payload.token);
         setError("");
-        setPairingMessage("Connected. Your phone is now the remote cockpit.");
+        setPairingMessage("Connected. Opening your remote workspace.");
         params.delete("pairCode");
         params.delete("serverUrl");
         const nextUrl = params.toString() ? `${window.location.pathname}?${params}` : window.location.pathname;
@@ -198,19 +239,27 @@ export function ClientApp({
         setMachines(machineData);
         setSessions(sessionData);
         setInbox(inboxData);
-        hadLoadedRemoteData.current = true;
+        setHasLoadedRemoteData(true);
+        setShowPairingPanel(false);
+        setPairingMessage("Connected to Bridge. Pick a session and drive.");
         setError("");
-        setPairingMessage("Connected to Bridge. Pick a machine and launch something dangerous-looking.");
-        setSelectedMachineId((current) => current ?? machineData[0]?.machineId ?? null);
-        setActiveSessionId((current) => current ?? sessionData[0]?.id ?? null);
+        const currentActive = sessionData.find((session) => session.id === activeSessionId);
+        const nextSession = currentActive ?? sessionData[0] ?? null;
+        setActiveSessionId(nextSession?.id ?? null);
+        setSelectedWorkspace((current) => (current !== "all" && sessionData.some((session) => session.cwd === current) ? current : nextSession?.cwd ?? "all"));
       } catch (loadError) {
         if (!cancelled) {
           const message = friendlyError(loadError instanceof Error ? loadError.message : "Failed to load data");
           setError(message);
-          if (/401|unauthorized/i.test(message)) {
+          if (/session/i.test(message) && !hasLoadedRemoteData) {
+            setPairingMessage("Connected, but still waiting for sessions to show up.");
+          }
+          if (/lost its session|unauthorized/i.test(message)) {
             window.localStorage.removeItem(tokenKey);
             setToken(null);
             setConnectedSince(null);
+            setHasLoadedRemoteData(false);
+            setShowPairingPanel(true);
             setPairingMessage("That browser session expired. Pair again with the latest code.");
           }
         }
@@ -225,11 +274,7 @@ export function ClientApp({
       cancelled = true;
       window.clearInterval(timer);
     };
-  }, [serverBaseUrl, token]);
-
-  useEffect(() => {
-    window.localStorage.setItem(notificationsKey, notificationsEnabled ? "true" : "false");
-  }, [notificationsEnabled]);
+  }, [activeSessionId, hasLoadedRemoteData, serverBaseUrl, token]);
 
   useEffect(() => {
     if (!notificationsEnabled || typeof window === "undefined" || Notification.permission !== "granted") {
@@ -264,7 +309,7 @@ export function ClientApp({
         }
       } catch (loadError) {
         if (!cancelled) {
-      setReconnectHint(loadError instanceof Error ? loadError.message : "Reconnect failed");
+          setReconnectHint(friendlyError(loadError instanceof Error ? loadError.message : "Reconnect failed"));
         }
       }
     };
@@ -289,8 +334,7 @@ export function ClientApp({
       if (payload.type === "session.snapshot") {
         setSessionEvents(payload.events);
         if (payload.session) {
-          const nextSession = payload.session;
-          setSessions((current) => current.map((session) => (session.id === nextSession.id ? nextSession : session)));
+          setSessions((current) => current.map((session) => (session.id === payload.session?.id ? payload.session : session)));
         }
         return;
       }
@@ -319,7 +363,7 @@ export function ClientApp({
     });
     socket.addEventListener("close", () => {
       if (!cancelled) {
-        setReconnectHint("Realtime feed disconnected. Polling still has your back.");
+        setReconnectHint("Realtime feed disconnected. We are polling so the app does not faint.");
       }
     });
 
@@ -330,19 +374,26 @@ export function ClientApp({
     };
   }, [activeSessionId, serverBaseUrl, token]);
 
+  useEffect(() => {
+    if (!activeSession) {
+      return;
+    }
+    setSelectedWorkspace((current) => (current === "all" ? current : workspaceFromSession(activeSession)));
+  }, [activeSession]);
+
   const requestPairing = async () => {
     if (!serverBaseUrl) {
       setError("Enter a Bridge server URL first.");
       return;
     }
-      const payload = await fetchJson<{ code: string; expiresAt: number }>(serverBaseUrl, "/auth/pairings/request", undefined, {
-        method: "POST",
-        body: JSON.stringify({ label: "web" })
-      });
+    const payload = await fetchJson<{ code: string; expiresAt: number }>(serverBaseUrl, "/auth/pairings/request", undefined, {
+      method: "POST",
+      body: JSON.stringify({ label: "web" })
+    });
     setPairingCode(payload.code);
-    setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}&serverUrl=${serverBaseUrl}`);
+    setPairingUrl(`${hostedAppOrigin}/?pairCode=${payload.code}&serverUrl=${encodeURIComponent(serverBaseUrl)}`);
     setError("");
-    setPairingMessage("Scan the QR or type the code below.");
+    setPairingMessage("Use this QR or code on your phone or another browser.");
   };
 
   const exchangePairing = async () => {
@@ -356,10 +407,11 @@ export function ClientApp({
         body: JSON.stringify({ code: exchangeCode, label: "web-client" })
       });
       setToken(payload.token);
+      setConnectedSince(Date.now());
+      setHasLoadedRemoteData(false);
       window.localStorage.setItem(tokenKey, payload.token);
       setError("");
-      setPairingMessage("Connected. Your phone is now the remote cockpit.");
-      setConnectedSince(Date.now());
+      setPairingMessage("Connected. Opening your remote workspace.");
     } catch (exchangeError) {
       setError(friendlyError(exchangeError instanceof Error ? exchangeError.message : "Failed to exchange code"));
       setPairingMessage("That code did not work. Tiny betrayal, but fixable.");
@@ -371,6 +423,7 @@ export function ClientApp({
   const launchSession = async (machineId: string, target: "codex" | "claude" | "gemini" | "terminal") => {
     if (!token) {
       setError("Pair this browser first.");
+      setShowPairingPanel(true);
       return;
     }
     const machine = machines.find((item) => item.machineId === machineId);
@@ -386,11 +439,11 @@ export function ClientApp({
         method: "POST",
         body: JSON.stringify(payload)
       });
-      setError("");
       setSessions((current) => [created, ...current.filter((session) => session.id !== created.id)]);
       setActiveSessionId(created.id);
-      setActiveTab("sessions");
-      setPairingMessage(`${target === "terminal" ? "Terminal" : target} launched on ${machine.hostname}.`);
+      setSelectedWorkspace(created.cwd);
+      setPairingMessage(`${target === "terminal" ? "Terminal" : target} launched in ${workspaceLabel(created.cwd)}.`);
+      setError("");
     } catch (launchError) {
       setError(friendlyError(launchError instanceof Error ? launchError.message : "Failed to launch session"));
     }
@@ -414,10 +467,7 @@ export function ClientApp({
     }
     const updated = await fetchJson<MachineRecord>(serverBaseUrl, `/machines/${machineId}/power-policy`, token, {
       method: "PUT",
-      body: JSON.stringify({
-        ...machine.powerPolicy,
-        mode
-      })
+      body: JSON.stringify({ ...machine.powerPolicy, mode })
     });
     setMachines((current) => current.map((item) => (item.machineId === machineId ? updated : item)));
   };
@@ -440,125 +490,129 @@ export function ClientApp({
     setNotificationsEnabled((current) => !current);
   };
 
-  const isConnected = Boolean(token) && hadLoadedRemoteData.current;
-  const connectedSessionCount = sessions.filter((session) => session.status !== "stopped").length;
-  const unreadInboxCount = inbox.filter((item) => !item.readAt).length;
+  const disconnect = () => {
+    window.localStorage.removeItem(tokenKey);
+    setToken(null);
+    setConnectedSince(null);
+    setHasLoadedRemoteData(false);
+    setShowPairingPanel(true);
+    setPairingMessage("Connection reset. Pair again with the latest code.");
+  };
+
+  const isConnected = Boolean(token) && hasLoadedRemoteData;
+
+  if (!isConnected || showPairingPanel) {
+    return (
+      <div className="pair-shell">
+        <section className="pair-screen">
+          <div className="pair-screen-copy">
+            <span className="pair-kicker">Bridge Remote</span>
+            <h1>Your laptop, but finally usable from your phone.</h1>
+            <p>
+              Pair once, then Bridge drops you straight into your sessions instead of making you live inside the setup screen forever like it’s some kind of bureaucratic escape room.
+            </p>
+            <div className="pair-copy-grid">
+              <div>
+                <strong>{machines.length}</strong>
+                <span>machines known</span>
+              </div>
+              <div>
+                <strong>{sessions.length}</strong>
+                <span>sessions visible</span>
+              </div>
+              <div>
+                <strong>{connectedSince ? formatTime(connectedSince) : "now"}</strong>
+                <span>last pair</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="pair-screen-card">
+            <div className="pair-screen-header">
+              <div>
+                <strong>{isConnected ? "Reconnect or pair another browser" : "Pair this browser"}</strong>
+                <div className="pair-screen-subtitle">{pairingMessage}</div>
+              </div>
+              {isConnected ? (
+                <button className="ghost-button" onClick={() => setShowPairingPanel(false)} type="button">
+                  Back to chats
+                </button>
+              ) : null}
+            </div>
+
+            <label className="pair-label">
+              Server URL
+              <input value={serverBaseUrl} onChange={(event) => setServerBaseUrl(event.target.value)} placeholder="https://your-bridge-server.example.com" />
+            </label>
+
+            <div className="pair-actions">
+              <button className="primary-button" onClick={requestPairing} type="button">Generate QR</button>
+              <button className="secondary-button" onClick={() => setTheme(theme === "dark" ? "light" : "dark")} type="button">
+                Theme: {theme}
+              </button>
+            </div>
+
+            <div className="pair-qr-block">
+              {pairingCode ? (
+                <>
+                  <div className="pair-qr-card">
+                    <QRCodeSVG value={pairingUrl || pairingCode} size={192} />
+                  </div>
+                  <div className="pair-code">
+                    <span>Code</span>
+                    <strong>{pairingCode}</strong>
+                  </div>
+                </>
+              ) : (
+                <div className="pair-qr-placeholder">Generate a code and the QR will appear here.</div>
+              )}
+            </div>
+
+            <div className="pair-input-row">
+              <input value={exchangeCode} onChange={(event) => setExchangeCode(event.target.value)} placeholder="Enter 6-digit code" />
+              <button className="primary-button" onClick={exchangePairing} type="button" disabled={isPairing}>
+                {isPairing ? "Connecting..." : "Connect"}
+              </button>
+            </div>
+
+            {error ? <div className="pair-error">{error}</div> : null}
+            {reconnectHint ? <div className="pair-hint">{reconnectHint}</div> : null}
+          </div>
+        </section>
+      </div>
+    );
+  }
 
   return (
-    <div className="shell">
-      <section className="hero hero-grid">
-        <div className="hero-copy">
-          <span className={`badge ${isConnected ? "badge-connected" : ""}`}>{isConnected ? "Connected / phone remote active" : "Phone-first / QR + code pairing / runtime switching"}</span>
-          <h1>Bridge turns your laptop into a remote command deck you can actually drive from your phone.</h1>
-          <p className="muted hero-text">
-            Pair once, then launch Codex, Claude Code, Gemini CLI, or a raw terminal from the same mobile-shaped app.
-            If the network hiccups, Bridge reconnects instead of entering interpretive dance.
-          </p>
-          {isConnected ? (
-            <div className="connection-banner">
-              <div>
-                <strong>Connected to your machine</strong>
-                <div className="muted">{serverBaseUrl} • {connectedSessionCount} live session{connectedSessionCount === 1 ? "" : "s"} • {unreadInboxCount} inbox</div>
-              </div>
-              <span className="status-pill tone-good">{connectedSince ? `paired ${new Intl.DateTimeFormat(undefined, { hour: "numeric", minute: "2-digit" }).format(connectedSince)}` : "paired"}</span>
-            </div>
-          ) : null}
-          <div className="hero-pills">
-            <span className="capability-pill capability-good">QR + 6-digit code</span>
-            <span className="capability-pill capability-good">Codex / Claude / Gemini</span>
-            <span className="capability-pill capability-good">Terminal from phone</span>
-          </div>
-          <div className="stats">
-            <div className="stat-card">
-              <strong>{machines.length}</strong>
-              <span className="muted">machines visible</span>
-            </div>
-            <div className="stat-card">
-              <strong>{sessions.length}</strong>
-              <span className="muted">sessions live</span>
-            </div>
-            <div className="stat-card">
-              <strong>{inbox.filter((item) => !item.readAt).length}</strong>
-              <span className="muted">inbox items</span>
-            </div>
-          </div>
-          {reconnectHint ? <p className="muted warning-text">{reconnectHint}</p> : null}
-        </div>
-
-        <div className="pair-card">
-          <div className="pair-card-header">
-            <h2>{isConnected ? "Bridge Connected" : "Pair This Browser"}</h2>
-            <span className={`status-pill ${isConnected ? "tone-good" : ""}`}>{isConnected ? "Connected" : "Ready to pair"}</span>
-          </div>
-          <p className="muted">{pairingMessage}</p>
-          <div className="launcher">
-            <button className="cta-button" onClick={requestPairing} type="button">
-              {isConnected ? "Pair Another Browser" : "Generate Pairing Code"}
-            </button>
-          </div>
-          <div className="launcher pair-controls">
-            <input
-              className="chip code-input"
-              value={serverBaseUrl}
-              onChange={(event) => setServerBaseUrl(event.target.value)}
-              placeholder="https://your-bridge-server.example.com"
-            />
-          </div>
-          {pairingCode ? (
-            <div className="qr-shell">
-              <div className="qr-card">
-                <QRCodeSVG value={pairingUrl || pairingCode} size={192} />
-              </div>
-              <div className="code-strip">
-                <span className="code-label">Code</span>
-                <strong>{pairingCode}</strong>
-              </div>
-            </div>
-          ) : (
-            <div className="qr-shell qr-empty">
-              <div className="qr-placeholder">QR appears here after you ask nicely.</div>
-            </div>
-          )}
-          <div className="launcher pair-controls">
-            <input
-              className="chip code-input"
-              value={exchangeCode}
-              onChange={(event) => setExchangeCode(event.target.value)}
-              placeholder="Enter 6-digit code"
-            />
-            <button className="chip action-button" onClick={exchangePairing} type="button" disabled={isPairing}>
-              {isPairing ? "Connecting..." : "Connect"}
-            </button>
-          </div>
-          {error && !isConnected ? <p className="muted danger-text">{error}</p> : null}
-          {error && isConnected ? <p className="muted warning-text">{error}</p> : null}
-        </div>
-      </section>
-
-      <Dashboard
-        machines={machines}
-        sessions={sessions}
-        inbox={inbox}
-        serverBaseUrl={serverBaseUrl}
-        activeTab={activeTab}
-        selectedMachineId={selectedMachineId}
-        activeSessionId={activeSessionId}
-        sessionEvents={sessionEvents}
-        composer={composer}
-        notificationsEnabled={notificationsEnabled}
-        onSelectTab={setActiveTab}
-        onSelectMachine={setSelectedMachineId}
-        onSelectSession={(sessionId) => {
-          setActiveSessionId(sessionId);
-          setActiveTab("sessions");
-        }}
-        onComposerChange={setComposer}
-        onSendInput={sendInput}
-        onLaunchSession={launchSession}
-        onPowerChange={updatePower}
-        onMarkInboxRead={markInboxRead}
-        onToggleNotifications={toggleNotifications}
-      />
-    </div>
+    <Dashboard
+      machines={machines}
+      sessions={sessions}
+      inbox={inbox}
+      serverBaseUrl={serverBaseUrl}
+      selectedWorkspace={selectedWorkspace}
+      activeSessionId={activeSessionId}
+      sessionEvents={sessionEvents}
+      composer={composer}
+      notificationsEnabled={notificationsEnabled}
+      theme={theme}
+      onSelectWorkspace={setSelectedWorkspace}
+      onSelectSession={setActiveSessionId}
+      onComposerChange={setComposer}
+      onSendInput={sendInput}
+      onLaunchSession={launchSession}
+      onPowerChange={updatePower}
+      onMarkInboxRead={markInboxRead}
+      onToggleNotifications={toggleNotifications}
+      onThemeChange={setTheme}
+      onDisconnect={disconnect}
+      onShowPairing={() => setShowPairingPanel(true)}
+    />
   );
+}
+
+function formatTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "numeric",
+    minute: "2-digit"
+  }).format(timestamp);
 }

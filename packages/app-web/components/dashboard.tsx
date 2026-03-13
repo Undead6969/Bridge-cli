@@ -1,19 +1,20 @@
 import React from "react";
 import type { InboxItem, MachineRecord, SessionRecord, SessionStreamEvent } from "@bridge/protocol";
 
+type ThemeMode = "dark" | "light";
+
 type DashboardProps = {
   machines: MachineRecord[];
   sessions: SessionRecord[];
   inbox: InboxItem[];
   serverBaseUrl: string;
-  activeTab: "home" | "sessions" | "inbox" | "settings";
-  selectedMachineId: string | null;
+  selectedWorkspace: string;
   activeSessionId: string | null;
   sessionEvents: SessionStreamEvent[];
   composer: string;
   notificationsEnabled: boolean;
-  onSelectTab: (tab: DashboardProps["activeTab"]) => void;
-  onSelectMachine: (machineId: string) => void;
+  theme: ThemeMode;
+  onSelectWorkspace: (workspace: string) => void;
   onSelectSession: (sessionId: string) => void;
   onComposerChange: (value: string) => void;
   onSendInput: () => void;
@@ -21,6 +22,15 @@ type DashboardProps = {
   onPowerChange: (machineId: string, mode: MachineRecord["powerPolicy"]["mode"]) => void;
   onMarkInboxRead: (id: string) => void;
   onToggleNotifications: () => void;
+  onThemeChange: (theme: ThemeMode) => void;
+  onDisconnect: () => void;
+  onShowPairing: () => void;
+};
+
+type WorkspaceOption = {
+  id: string;
+  label: string;
+  detail: string;
 };
 
 function formatTime(timestamp?: number): string {
@@ -33,37 +43,97 @@ function formatTime(timestamp?: number): string {
   }).format(timestamp);
 }
 
-function statusTone(status: SessionRecord["status"]): string {
-  if (status === "approval-needed" || status === "blocked" || status === "errored" || status === "offline") {
+function formatRelative(timestamp?: number): string {
+  if (!timestamp) {
+    return "just now";
+  }
+  const delta = Date.now() - timestamp;
+  const minutes = Math.max(1, Math.round(delta / 60_000));
+  if (minutes < 60) {
+    return `${minutes}m ago`;
+  }
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) {
+    return `${hours}h ago`;
+  }
+  return `${Math.round(hours / 24)}d ago`;
+}
+
+function sessionTone(session: SessionRecord): "good" | "danger" | "muted" {
+  if (session.status === "approval-needed" || session.status === "blocked" || session.status === "errored" || session.status === "offline") {
     return "danger";
   }
-  if (status === "completed" || status === "waiting") {
+  if (session.status === "running" || session.status === "waiting" || session.status === "completed") {
     return "good";
   }
-  return "neutral";
+  return "muted";
 }
 
-function runtimeLabel(session: SessionRecord): string {
-  return session.runtime === "agent-session" ? session.agent ?? "agent" : "terminal";
-}
-
-function statusCopy(session: SessionRecord): string {
+function sessionStatusCopy(session: SessionRecord): string {
   if (session.status === "running") {
-    return session.runtime === "terminal-session" ? "Live terminal attached" : "Agent is working";
+    return session.runtime === "terminal-session" ? "live terminal attached" : "working now";
+  }
+  if (session.status === "waiting") {
+    return "ready for your next message";
   }
   if (session.status === "approval-needed") {
-    return "Needs your approval";
+    return "needs approval";
   }
   if (session.status === "blocked") {
-    return "Hit something cranky";
+    return "blocked";
   }
   if (session.status === "completed") {
-    return "Finished and waiting for you";
+    return "finished";
   }
   if (session.status === "stopped") {
-    return "Stopped on the machine";
+    return "stopped";
   }
-  return "Getting ready";
+  if (session.status === "starting") {
+    return "starting";
+  }
+  return session.status;
+}
+
+function sessionPreview(session: SessionRecord, events: SessionStreamEvent[]): string {
+  const relevant = events.filter((event) => event.sessionId === session.id);
+  const last = relevant.at(-1);
+  if (!last) {
+    return session.runtime === "terminal-session" ? "Terminal session ready." : "Start the conversation.";
+  }
+  const cleaned = last.data.replace(/\s+/g, " ").trim();
+  if (cleaned.length === 0) {
+    return sessionStatusCopy(session);
+  }
+  return cleaned.slice(0, 110);
+}
+
+function displayRuntime(session: SessionRecord): string {
+  return session.runtime === "terminal-session" ? "Terminal" : session.agent === "claude" ? "Claude Code" : session.agent === "gemini" ? "Gemini CLI" : "Codex";
+}
+
+function workspaceIdFromSession(session: SessionRecord): string {
+  return session.cwd;
+}
+
+function workspaceLabel(cwd: string): string {
+  const parts = cwd.split("/").filter(Boolean);
+  if (parts.length === 0) {
+    return "Root";
+  }
+  return parts[parts.length - 1] ?? cwd;
+}
+
+function workspaceDetail(cwd: string, machine?: MachineRecord): string {
+  return `${cwd} ${machine ? `• ${machine.hostname}` : ""}`.trim();
+}
+
+function avatarSeed(input: string): string {
+  const seeds = ["#37a9ff", "#76e3ac", "#ff9f68", "#ff6d92", "#b88cff", "#f4d35e"];
+  let value = 0;
+  for (const char of input) {
+    value += char.charCodeAt(0);
+  }
+  return seeds[value % seeds.length] ?? seeds[0];
 }
 
 export function Dashboard(props: DashboardProps) {
@@ -72,278 +142,327 @@ export function Dashboard(props: DashboardProps) {
     sessions,
     inbox,
     serverBaseUrl,
-    activeTab,
-    selectedMachineId,
+    selectedWorkspace,
     activeSessionId,
     sessionEvents,
     composer,
     notificationsEnabled,
-    onSelectTab,
-    onSelectMachine,
+    theme,
+    onSelectWorkspace,
     onSelectSession,
     onComposerChange,
     onSendInput,
     onLaunchSession,
     onPowerChange,
     onMarkInboxRead,
-    onToggleNotifications
+    onToggleNotifications,
+    onThemeChange,
+    onDisconnect,
+    onShowPairing
   } = props;
 
-  const selectedMachine = machines.find((machine) => machine.machineId === selectedMachineId) ?? machines[0] ?? null;
-  const activeSession = sessions.find((session) => session.id === activeSessionId) ?? sessions[0] ?? null;
-  const onlineMachines = machines.filter((machine) => machine.online).length;
-  const attentionSessions = sessions.filter((session) => session.attention !== "idle").length;
+  const sessionsByWorkspace = React.useMemo(() => {
+    const map = new Map<string, SessionRecord[]>();
+    for (const session of sessions) {
+      const key = workspaceIdFromSession(session);
+      const current = map.get(key) ?? [];
+      current.push(session);
+      map.set(key, current);
+    }
+    return map;
+  }, [sessions]);
 
-  const homeView = (
-    <div className="tab-body">
-      <section className="panel hero-panel">
-        <div className="section-header stack-on-mobile">
-          <div>
-            <span className="eyebrow">Bridge Home</span>
-            <h2>Phone-first remote control for the machines doing the actual work.</h2>
-          </div>
-          <div className="mini-stat-grid">
-            <div className="mini-stat">
-              <strong>{onlineMachines}</strong>
-              <span>online</span>
-            </div>
-            <div className="mini-stat">
-              <strong>{sessions.length}</strong>
-              <span>sessions</span>
-            </div>
-            <div className="mini-stat">
-              <strong>{attentionSessions}</strong>
-              <span>attention</span>
-            </div>
-          </div>
-        </div>
-        <p className="muted">
-          Codex is the default pilot, but the launcher also offers Claude Code, Gemini CLI, and raw terminal when the machine can support them.
-        </p>
-      </section>
+  const workspaceOptions = React.useMemo<WorkspaceOption[]>(() => {
+    const options = new Map<string, WorkspaceOption>();
+    for (const session of sessions) {
+      const machine = machines.find((item) => item.machineId === session.machineId);
+      options.set(workspaceIdFromSession(session), {
+        id: workspaceIdFromSession(session),
+        label: workspaceLabel(session.cwd),
+        detail: workspaceDetail(session.cwd, machine)
+      });
+    }
+    if (options.size === 0) {
+      options.set("all", {
+        id: "all",
+        label: "All workspaces",
+        detail: "No sessions yet"
+      });
+    }
+    return [{ id: "all", label: "All workspaces", detail: `${sessions.length} session${sessions.length === 1 ? "" : "s"}` }, ...[...options.values()].filter((item) => item.id !== "all")];
+  }, [machines, sessions]);
 
-      <section className="panel">
-        <div className="section-header">
-          <div>
-            <span className="eyebrow">Machines</span>
-            <h2>Pick a machine, then launch like you mean it.</h2>
-          </div>
-        </div>
-        <div className="stack-list">
-          {machines.map((machine) => (
-            <button key={machine.machineId} className={`machine-card ${selectedMachine?.machineId === machine.machineId ? "selected-card" : ""}`} onClick={() => onSelectMachine(machine.machineId)} type="button">
-              <div className="row-header">
-                <strong>{machine.hostname}</strong>
-                <span className={`status-pill tone-${machine.online ? "good" : "danger"}`}>{machine.online ? "Online" : "Offline"}</span>
-              </div>
-              <div className="muted">{machine.capabilities.os.platform} / {machine.capabilities.os.arch}</div>
-              <div className="capability-row">
-                <span className={`capability-pill ${machine.capabilities.cli.codex.launchable ? "capability-good" : ""}`}>Codex {machine.capabilities.cli.codex.version ?? ""}</span>
-                <span className={`capability-pill ${machine.capabilities.cli.claude.launchable ? "capability-good" : ""}`}>Claude</span>
-                <span className={`capability-pill ${machine.capabilities.cli.gemini.launchable ? "capability-good" : ""}`}>Gemini</span>
-                <span className={`capability-pill ${machine.capabilities.terminal.supportsInteractivePty ? "capability-good" : ""}`}>PTY</span>
-              </div>
-              <div className="muted">Daemon: {machine.daemonConnected ? "connected" : "missing"} • Power: {machine.powerPolicy.mode}</div>
-            </button>
-          ))}
-        </div>
-      </section>
+  const filteredSessions = React.useMemo(() => {
+    if (selectedWorkspace === "all") {
+      return sessions;
+    }
+    return sessions.filter((session) => workspaceIdFromSession(session) === selectedWorkspace);
+  }, [selectedWorkspace, sessions]);
 
-      {selectedMachine ? (
-        <section className="panel">
-          <div className="section-header">
-            <div>
-              <span className="eyebrow">Machine</span>
-              <h2>{selectedMachine.hostname}</h2>
-            </div>
-            <span className="status-pill">{selectedMachine.online ? "remote ready" : "awaiting daemon"}</span>
-          </div>
-          <div className="button-grid">
-            <button className="launch-button primary" onClick={() => onLaunchSession(selectedMachine.machineId, "codex")} type="button">
-              Launch Codex
-            </button>
-            <button className="launch-button" disabled={!selectedMachine.capabilities.cli.claude.launchable} onClick={() => onLaunchSession(selectedMachine.machineId, "claude")} type="button">
-              Claude Code
-            </button>
-            <button className="launch-button" disabled={!selectedMachine.capabilities.cli.gemini.launchable} onClick={() => onLaunchSession(selectedMachine.machineId, "gemini")} type="button">
-              Gemini CLI
-            </button>
-            <button className="launch-button" disabled={!selectedMachine.capabilities.terminal.supportsInteractivePty} onClick={() => onLaunchSession(selectedMachine.machineId, "terminal")} type="button">
-              Terminal
-            </button>
-          </div>
-          <div className="machine-health">
-            <div className="health-chip">Server: {serverBaseUrl || "missing"}</div>
-            <div className="health-chip">Wake policy: {selectedMachine.powerPolicy.mode}</div>
-            <div className="health-chip">Ownership: remote active</div>
-          </div>
-          <div className="power-grid">
-            {(["normal", "stay-awake-during-activity", "always-awake"] as const).map((mode) => (
-              <button
-                key={mode}
-                className={`power-button ${selectedMachine.powerPolicy.mode === mode ? "power-active" : ""}`}
-                onClick={() => onPowerChange(selectedMachine.machineId, mode)}
-                type="button"
-              >
-                {mode}
-              </button>
-            ))}
-          </div>
-        </section>
-      ) : null}
-    </div>
+  const activeSession = React.useMemo(
+    () => filteredSessions.find((session) => session.id === activeSessionId) ?? sessions.find((session) => session.id === activeSessionId) ?? filteredSessions[0] ?? sessions[0] ?? null,
+    [activeSessionId, filteredSessions, sessions]
   );
 
-  const sessionsView = (
-    <div className="tab-body">
-      <section className="panel">
-        <div className="section-header stack-on-mobile">
-          <div>
-            <span className="eyebrow">Sessions</span>
-            <h2>Live work, grouped by whatever is currently stealing your attention.</h2>
-          </div>
-          <span className="muted">Tap a session to open the mobile transcript or terminal view.</span>
-        </div>
-        <div className="stack-list">
-          {sessions.map((session) => (
-            <button key={session.id} className={`session-card ${activeSession?.id === session.id ? "selected-card" : ""}`} onClick={() => onSelectSession(session.id)} type="button">
-              <div className="row-header">
-                <strong>{session.title}</strong>
-                <span className={`status-pill tone-${statusTone(session.status)}`}>{session.status}</span>
-              </div>
-              <div className="muted">{runtimeLabel(session)} • {session.cwd}</div>
-              <div className="session-metadata">
-                <span className="session-tag">{session.owner}</span>
-                <span className="session-tag">{session.unreadCount} unread</span>
-                <span className="session-tag">{formatTime(session.lastEventAt)}</span>
-              </div>
-              <div className="muted">{statusCopy(session)}</div>
-            </button>
-          ))}
-        </div>
-      </section>
+  const activeMachine = activeSession ? machines.find((machine) => machine.machineId === activeSession.machineId) ?? null : null;
+  const groupedSessions = React.useMemo(() => {
+    const groups = new Map<string, SessionRecord[]>();
+    for (const session of filteredSessions) {
+      const key = workspaceLabel(session.cwd);
+      const current = groups.get(key) ?? [];
+      current.push(session);
+      groups.set(key, current);
+    }
+    return [...groups.entries()];
+  }, [filteredSessions]);
 
-      {activeSession ? (
-        <section className="panel session-view">
-          <div className="section-header">
+  const activePreview = activeSession ? sessionPreview(activeSession, sessionEvents) : "Pick a session to start.";
+  const hasActiveApprovals = filteredSessions.some((session) => session.status === "approval-needed");
+  const unreadCount = filteredSessions.reduce((count, session) => count + session.unreadCount, 0);
+
+  return (
+    <section className="messenger-shell">
+      <header className="app-header">
+        <div className="app-header-main">
+          <div className="brand-mark">B</div>
+          <div>
+            <div className="app-title">Bridge</div>
+            <div className="app-subtitle">Remote coding, now with less emotional ambiguity.</div>
+          </div>
+        </div>
+        <div className="header-actions">
+          <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
+            {workspaceOptions.map((workspace) => (
+              <option key={workspace.id} value={workspace.id}>
+                {workspace.label}
+              </option>
+            ))}
+          </select>
+          <button className="header-icon-button" onClick={onShowPairing} type="button" aria-label="Show pairing controls">
+            Pair
+          </button>
+        </div>
+      </header>
+
+      <div className="messenger-layout">
+        <aside className="chat-sidebar">
+          <div className="sidebar-top">
             <div>
-              <span className="eyebrow">Session View</span>
-              <h2>{activeSession.title}</h2>
+              <div className="sidebar-title">Sessions</div>
+              <div className="sidebar-subtitle">{workspaceOptions.find((item) => item.id === selectedWorkspace)?.detail ?? "All workspaces"}</div>
             </div>
-            <span className={`status-pill tone-${statusTone(activeSession.status)}`}>{activeSession.status}</span>
+            <button className="header-icon-button compact-button" onClick={onShowPairing} type="button">
+              +
+            </button>
           </div>
-          <div className="session-banner">
-            <span>Owner: {activeSession.owner}</span>
-            <span>Attention: {activeSession.attention}</span>
-            <span>{activeSession.runtime === "terminal-session" ? activeSession.terminalBackend ?? "pending" : runtimeLabel(activeSession)}</span>
+
+          <div className="sidebar-summary">
+            <div className="sidebar-summary-card">
+              <strong>{machines.filter((machine) => machine.online).length}</strong>
+              <span>machines online</span>
+            </div>
+            <div className="sidebar-summary-card">
+              <strong>{unreadCount}</strong>
+              <span>unread</span>
+            </div>
+            <div className="sidebar-summary-card">
+              <strong>{hasActiveApprovals ? "1+" : "0"}</strong>
+              <span>approvals</span>
+            </div>
           </div>
-          <div className={`live-status live-status-${statusTone(activeSession.status)}`}>
-            <strong>{statusCopy(activeSession)}</strong>
-            <span>{activeSession.runtime === "terminal-session" ? "Phone terminal mode" : "Chat mode"} • {formatTime(activeSession.lastEventAt)}</span>
-          </div>
-          <div className={`transcript ${activeSession.runtime === "terminal-session" ? "terminal-transcript" : ""}`}>
-            {sessionEvents.length === 0 ? (
-              <div className="transcript-bubble muted">No events yet. The session is either shy or brand new.</div>
+
+          <div className="chat-groups">
+            {groupedSessions.length === 0 ? (
+              <div className="empty-chats">
+                <strong>No sessions yet</strong>
+                <span>Launch Codex, Claude, Gemini, or a terminal from the active machine.</span>
+              </div>
             ) : (
-              sessionEvents.map((event) => (
-                <div key={event.id} className={`transcript-bubble bubble-${event.kind}`}>
-                  <span className="bubble-kind">{event.kind}</span>
-                  <pre>{event.data}</pre>
+              groupedSessions.map(([group, items]) => (
+                <div key={group} className="chat-group">
+                  <div className="chat-group-label">{group}</div>
+                  {items.map((session) => {
+                    const machine = machines.find((item) => item.machineId === session.machineId);
+                    return (
+                      <button
+                        key={session.id}
+                        className={`chat-list-item ${activeSession?.id === session.id ? "chat-list-item-active" : ""}`}
+                        onClick={() => onSelectSession(session.id)}
+                        type="button"
+                      >
+                        <div className="chat-avatar" style={{ backgroundColor: avatarSeed(session.title) }}>
+                          {displayRuntime(session).slice(0, 1)}
+                        </div>
+                        <div className="chat-copy">
+                          <div className="chat-copy-top">
+                            <strong>{session.title}</strong>
+                            <span>{formatTime(session.lastEventAt)}</span>
+                          </div>
+                          <div className="chat-copy-middle">
+                            <span>{machine?.hostname ?? "machine"}</span>
+                            <span className={`session-dot dot-${sessionTone(session)}`}>{sessionStatusCopy(session)}</span>
+                          </div>
+                          <div className="chat-copy-bottom">{sessionPreview(session, sessionEvents)}</div>
+                        </div>
+                        {session.unreadCount > 0 ? <div className="unread-badge">{session.unreadCount}</div> : null}
+                      </button>
+                    );
+                  })}
                 </div>
               ))
             )}
           </div>
-          <div className="composer-bar">
-            <input value={composer} onChange={(event) => onComposerChange(event.target.value)} placeholder={activeSession.runtime === "terminal-session" ? "Type shell input" : "Send a prompt"} />
-            <button className="cta-button" onClick={onSendInput} type="button">Send</button>
-          </div>
-        </section>
-      ) : null}
-    </div>
-  );
+        </aside>
 
-  const inboxView = (
-    <div className="tab-body">
-      <section className="panel">
-        <div className="section-header">
-          <div>
-            <span className="eyebrow">Inbox</span>
-            <h2>Everything that wants your attention without texting your soul at 2 AM.</h2>
-          </div>
-        </div>
-        <div className="stack-list">
-          {inbox.map((item) => (
-            <button key={item.id} className={`inbox-card ${item.readAt ? "read-card" : "unread-card"}`} onClick={() => onMarkInboxRead(item.id)} type="button">
-              <div className="row-header">
-                <strong>{item.title}</strong>
-                <span className={`status-pill tone-${item.level === "critical" || item.level === "warning" ? "danger" : item.level === "success" ? "good" : "neutral"}`}>
-                  {item.level}
-                </span>
+        <main className="chat-main">
+          {activeSession ? (
+            <>
+              <header className="chat-header">
+                <div className="chat-header-left">
+                  <div className="chat-avatar large-avatar" style={{ backgroundColor: avatarSeed(activeSession.title) }}>
+                    {displayRuntime(activeSession).slice(0, 1)}
+                  </div>
+                  <div>
+                    <div className="chat-header-title">{activeSession.title}</div>
+                    <div className="chat-header-subtitle">
+                      {activeMachine?.hostname ?? "machine"} • {activeSession.cwd} • {displayRuntime(activeSession)}
+                    </div>
+                  </div>
+                </div>
+                <div className="chat-header-right">
+                  <span className={`session-badge badge-${sessionTone(activeSession)}`}>{sessionStatusCopy(activeSession)}</span>
+                  <span className="header-meta-pill">{activeSession.owner}</span>
+                </div>
+              </header>
+
+              <section className="chat-launch-strip">
+                {activeMachine ? (
+                  <>
+                    <div className="chat-launch-copy">
+                      <strong>{activeMachine.hostname}</strong>
+                      <span>Switch agents or open a terminal without leaving the thread list.</span>
+                    </div>
+                    <div className="launch-chip-row">
+                      <button className="launch-chip launch-chip-primary" onClick={() => onLaunchSession(activeMachine.machineId, "codex")} type="button">Codex</button>
+                      <button className="launch-chip" disabled={!activeMachine.capabilities.cli.claude.launchable} onClick={() => onLaunchSession(activeMachine.machineId, "claude")} type="button">Claude</button>
+                      <button className="launch-chip" disabled={!activeMachine.capabilities.cli.gemini.launchable} onClick={() => onLaunchSession(activeMachine.machineId, "gemini")} type="button">Gemini</button>
+                      <button className="launch-chip" disabled={!activeMachine.capabilities.terminal.supportsInteractivePty} onClick={() => onLaunchSession(activeMachine.machineId, "terminal")} type="button">Terminal</button>
+                    </div>
+                  </>
+                ) : null}
+              </section>
+
+              <section className={`chat-transcript ${activeSession.runtime === "terminal-session" ? "chat-transcript-terminal" : ""}`}>
+                {sessionEvents.length === 0 ? (
+                  <div className="message-system">No messages yet. This session is either brand new or plotting.</div>
+                ) : (
+                  sessionEvents.map((event) => {
+                    const isUser = event.kind === "input";
+                    const tone =
+                      event.kind === "approval"
+                        ? "warning"
+                        : event.kind === "blocked"
+                          ? "danger"
+                          : event.kind === "completed" || event.kind === "ready"
+                            ? "success"
+                            : event.kind === "stderr"
+                              ? "neutral"
+                              : isUser
+                                ? "user"
+                                : "default";
+                    return (
+                      <article key={event.id} className={`message-bubble message-${tone}`}>
+                        <div className="message-kind">{event.kind}</div>
+                        <pre>{event.data}</pre>
+                        <div className="message-meta">{formatTime(event.at)}</div>
+                      </article>
+                    );
+                  })
+                )}
+              </section>
+
+              <footer className="chat-composer">
+                <div className="composer-frame">
+                  <input
+                    value={composer}
+                    onChange={(event) => onComposerChange(event.target.value)}
+                    placeholder={activeSession.runtime === "terminal-session" ? "Type terminal input..." : "Message this session..."}
+                  />
+                  <button className="composer-send" onClick={onSendInput} type="button">
+                    Send
+                  </button>
+                </div>
+              </footer>
+            </>
+          ) : (
+            <div className="empty-chat-stage">
+              <strong>No active chat yet</strong>
+              <span>Pick a session on the left, or launch one from a connected machine.</span>
+            </div>
+          )}
+        </main>
+
+        <aside className="settings-rail">
+          <div className="settings-card">
+            <div className="settings-card-title">Connection</div>
+            <div className="settings-card-body">
+              <div className="settings-line">
+                <span>Server</span>
+                <strong>{serverBaseUrl}</strong>
               </div>
-              <div>{item.body}</div>
-              <div className="muted">{item.category} • {formatTime(item.createdAt)}</div>
-            </button>
-          ))}
-          {inbox.length === 0 ? <div className="empty-state">No inbox items yet. Suspiciously peaceful.</div> : null}
-        </div>
-      </section>
-    </div>
-  );
+              <div className="settings-line">
+                <span>Theme</span>
+                <div className="theme-switcher">
+                  <button className={theme === "dark" ? "theme-pill theme-pill-active" : "theme-pill"} onClick={() => onThemeChange("dark")} type="button">Dark</button>
+                  <button className={theme === "light" ? "theme-pill theme-pill-active" : "theme-pill"} onClick={() => onThemeChange("light")} type="button">Light</button>
+                </div>
+              </div>
+              <div className="settings-line">
+                <span>Notifications</span>
+                <button className={notificationsEnabled ? "theme-pill theme-pill-active" : "theme-pill"} onClick={onToggleNotifications} type="button">
+                  {notificationsEnabled ? "On" : "Off"}
+                </button>
+              </div>
+            </div>
+            <div className="settings-actions">
+              <button className="settings-button" onClick={onShowPairing} type="button">Show pairing</button>
+              <button className="settings-button settings-button-danger" onClick={onDisconnect} type="button">Restart connection</button>
+            </div>
+          </div>
 
-  const settingsView = (
-    <div className="tab-body">
-      <section className="panel">
-        <div className="section-header">
-          <div>
-            <span className="eyebrow">Settings</span>
-            <h2>Phone-friendly controls for the parts that matter.</h2>
-          </div>
-        </div>
-        <div className="settings-list">
-          <div className="settings-row">
-            <div>
-              <strong>Bridge server</strong>
-              <div className="muted">{serverBaseUrl || "Not configured yet"}</div>
+          <div className="settings-card">
+            <div className="settings-card-title">Machines</div>
+            <div className="machine-list">
+              {machines.map((machine) => (
+                <div key={machine.machineId} className="machine-mini-card">
+                  <div>
+                    <strong>{machine.hostname}</strong>
+                    <div className="machine-mini-copy">{machine.capabilities.os.platform} • {machine.online ? "online" : "offline"}</div>
+                  </div>
+                  <select value={machine.powerPolicy.mode} onChange={(event) => onPowerChange(machine.machineId, event.target.value as MachineRecord["powerPolicy"]["mode"])}>
+                    <option value="normal">normal</option>
+                    <option value="stay-awake-during-activity">stay awake</option>
+                    <option value="always-awake">always awake</option>
+                  </select>
+                </div>
+              ))}
             </div>
           </div>
-          <div className="settings-row">
-            <div>
-              <strong>Browser notifications</strong>
-              <div className="muted">Ready/done, approval, and machine alerts while this tab is open.</div>
-            </div>
-            <button className={`power-button ${notificationsEnabled ? "power-active" : ""}`} onClick={onToggleNotifications} type="button">
-              {notificationsEnabled ? "Enabled" : "Enable"}
-            </button>
-          </div>
-          <div className="settings-row">
-            <div>
-              <strong>Remote handoff</strong>
-              <div className="muted">Bridge marks active phone sessions as remote-owned when you interact.</div>
-            </div>
-          </div>
-        </div>
-      </section>
-    </div>
-  );
 
-  return (
-    <section className="product-shell">
-      <nav className="tabbar">
-        {([
-          ["home", "Home"],
-          ["sessions", "Sessions"],
-          ["inbox", "Inbox"],
-          ["settings", "Settings"]
-        ] as const).map(([tab, label]) => (
-          <button key={tab} className={`tabbar-button ${activeTab === tab ? "tabbar-active" : ""}`} onClick={() => onSelectTab(tab)} type="button">
-            {label}
-          </button>
-        ))}
-      </nav>
-      {activeTab === "home" ? homeView : null}
-      {activeTab === "sessions" ? sessionsView : null}
-      {activeTab === "inbox" ? inboxView : null}
-      {activeTab === "settings" ? settingsView : null}
+          <div className="settings-card">
+            <div className="settings-card-title">Inbox</div>
+            <div className="inbox-stack">
+              {inbox.slice(0, 6).map((item) => (
+                <button key={item.id} className={`inbox-mini ${item.readAt ? "" : "inbox-mini-unread"}`} onClick={() => onMarkInboxRead(item.id)} type="button">
+                  <strong>{item.title}</strong>
+                  <span>{item.body}</span>
+                </button>
+              ))}
+              {inbox.length === 0 ? <div className="inbox-empty">No alerts. Suspiciously peaceful.</div> : null}
+            </div>
+          </div>
+        </aside>
+      </div>
     </section>
   );
 }

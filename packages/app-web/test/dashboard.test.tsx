@@ -5,7 +5,7 @@ import { Dashboard } from "../components/dashboard";
 import { defaultPowerPolicy, type InboxItem, type MachineRecord, type SessionRecord } from "@bridge/protocol";
 
 describe("Dashboard", () => {
-  it("renders machine and session details in the phone shell", () => {
+  it("renders messenger-style workspace and session details", () => {
     const machines: MachineRecord[] = [
       {
         machineId: "m1",
@@ -91,14 +91,13 @@ describe("Dashboard", () => {
         sessions={sessions}
         inbox={inbox}
         serverBaseUrl="https://bridge.example.com"
-        activeTab="home"
-        selectedMachineId="m1"
+        selectedWorkspace="all"
         activeSessionId="s1"
         sessionEvents={[]}
         composer=""
         notificationsEnabled={false}
-        onSelectTab={() => undefined}
-        onSelectMachine={() => undefined}
+        theme="dark"
+        onSelectWorkspace={() => undefined}
         onSelectSession={() => undefined}
         onComposerChange={() => undefined}
         onSendInput={() => undefined}
@@ -106,11 +105,15 @@ describe("Dashboard", () => {
         onPowerChange={() => undefined}
         onMarkInboxRead={() => undefined}
         onToggleNotifications={() => undefined}
+        onThemeChange={() => undefined}
+        onDisconnect={() => undefined}
+        onShowPairing={() => undefined}
       />
     );
 
     expect(html).toContain("laptop");
-    expect(html).toContain("Launch Codex");
-    expect(html).toContain("Codex 5.4");
+    expect(html).toContain("Bridge");
+    expect(html).toContain("Sessions");
+    expect(html).toContain("Codex");
   });
 });
