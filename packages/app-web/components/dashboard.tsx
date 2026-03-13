@@ -370,59 +370,32 @@ export function Dashboard(props: DashboardProps) {
 
   return (
     <section className={`messenger-shell ${mobilePane === "chat" ? "messenger-mobile-chat" : ""} ${settingsOpen ? "messenger-settings-open" : ""}`}>
-      <header className="app-header">
-        <div className="app-header-main">
-          <div className="brand-mark">B</div>
-          <div>
-            <div className="app-title">Bridge</div>
-            <div className="app-subtitle">Remote coding, now with less emotional ambiguity.</div>
-          </div>
-        </div>
-        <div className="header-actions">
-          <div className="workspace-header-chip">
-            <span className="workspace-header-label">Workspace</span>
-            <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
-              {workspaceOptions.map((workspace) => (
-                <option key={workspace.id} value={workspace.id}>
-                  {workspace.label}
-                </option>
-              ))}
-            </select>
-          </div>
-          <button className="header-icon-button" onClick={onShowPairing} type="button" aria-label="Show pairing controls">
-            Pair
-          </button>
-          <button className="header-icon-button" onClick={onToggleSettings} type="button" aria-label="Toggle settings">
-            Settings
-          </button>
-        </div>
-      </header>
-
       <div className="messenger-layout">
         <aside className="chat-sidebar">
+          <div className="sidebar-brand">
+            <div className="brand-mark">B</div>
+            <div className="sidebar-brand-copy">
+              <strong>Bridge</strong>
+              <span>Remote coding</span>
+            </div>
+          </div>
+
           <div className="sidebar-top">
             <div>
-              <div className="sidebar-title">Sessions</div>
+              <div className="sidebar-title">Your chats</div>
               <div className="sidebar-subtitle">{activeWorkspace?.detail ?? "All workspaces"}</div>
             </div>
-            <button className="header-icon-button compact-button" onClick={onShowPairing} type="button">
-              +
+            <button className="sidebar-action-button" onClick={onShowPairing} type="button">
+              New
             </button>
           </div>
 
-          <div className="sidebar-summary">
-            <div className="sidebar-summary-card">
-              <strong>{machines.filter((machine) => machine.online).length}</strong>
-              <span>machines online</span>
-            </div>
-            <div className="sidebar-summary-card">
-              <strong>{unreadCount}</strong>
-              <span>unread</span>
-            </div>
-            <div className="sidebar-summary-card">
-              <strong>{hasActiveApprovals ? "1+" : "0"}</strong>
-              <span>approvals</span>
-            </div>
+          <div className="sidebar-summary-pills">
+            <span className="sidebar-pill">{machines.filter((machine) => machine.online).length} online</span>
+            <span className="sidebar-pill">{unreadCount} unread</span>
+            <span className={`sidebar-pill ${hasActiveApprovals ? "sidebar-pill-alert" : ""}`}>
+              {hasActiveApprovals ? "approval needed" : "no approvals"}
+            </span>
           </div>
 
           <div className="chat-groups">
@@ -471,37 +444,31 @@ export function Dashboard(props: DashboardProps) {
         <main className="chat-main">
           {activeSession ? (
             <>
-              <div className="chat-connection-banner">
-                <div>
-                  <strong>{activeMachine?.online ? "Connected" : "Waiting on machine"}</strong>
-                  <span>
-                    {activeMachine?.hostname ?? "machine"} • {activeWorkspace?.label ?? "workspace"} • {activeSession.runtime === "terminal-session" ? "terminal session" : "agent chat"}
-                  </span>
-                </div>
-                <div className="chat-connection-state">
-                  <span className={`session-dot dot-${sessionTone(activeSession)}`}>{sessionStatusCopy(activeSession)}</span>
-                  <span className="header-meta-pill">{activeSession.owner}</span>
-                </div>
-              </div>
-
               <header className="chat-header">
                 <div className="chat-header-left">
                   <button className="mobile-back-button" onClick={onBackToSessions} type="button" aria-label="Back to sessions">
                     ←
                   </button>
-                  <div className="chat-avatar large-avatar" style={{ backgroundColor: avatarSeed(activeSession.title) }}>
-                    {displayRuntime(activeSession).slice(0, 1)}
-                  </div>
                   <div>
+                    <div className="chat-header-kicker">{displayRuntime(activeSession)}</div>
                     <div className="chat-header-title">{activeSession.title}</div>
                     <div className="chat-header-subtitle">
-                      {activeMachine?.hostname ?? "machine"} • {activeSession.cwd} • {displayRuntime(activeSession)}
+                      {activeMachine?.hostname ?? "machine"} • {activeWorkspace?.label ?? "workspace"} • {sessionStatusCopy(activeSession)}
                     </div>
                   </div>
                 </div>
                 <div className="chat-header-right">
-                  <span className={`session-badge badge-${sessionTone(activeSession)}`}>{sessionStatusCopy(activeSession)}</span>
-                  <span className="header-meta-pill">{activeSession.owner}</span>
+                  <div className="workspace-header-chip chat-header-chip">
+                    <span className="workspace-header-label">Workspace</span>
+                    <select className="workspace-select" value={selectedWorkspace} onChange={(event) => onSelectWorkspace(event.target.value)}>
+                      {workspaceOptions.map((workspace) => (
+                        <option key={workspace.id} value={workspace.id}>
+                          {workspace.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <button className="header-icon-button compact-button" onClick={onShowPairing} type="button">Pair</button>
                   <button className="header-icon-button compact-button" onClick={onToggleSettings} type="button">⋯</button>
                 </div>
               </header>
@@ -511,7 +478,7 @@ export function Dashboard(props: DashboardProps) {
                   <>
                     <div className="chat-launch-copy">
                       <strong>{activeMachine.hostname}</strong>
-                      <span>Switch agents or open a terminal without leaving the thread list.</span>
+                      <span>Switch runtimes without leaving the conversation.</span>
                     </div>
                     <div className="launch-chip-row">
                       <button className="launch-chip launch-chip-primary" onClick={() => onLaunchSession(activeMachine.machineId, "codex")} type="button">Codex</button>
@@ -525,7 +492,7 @@ export function Dashboard(props: DashboardProps) {
 
               <section className={`chat-transcript ${activeSession.runtime === "terminal-session" ? "chat-transcript-terminal" : ""}`}>
                 {activeSession.runtime === "terminal-session" ? (
-                  <div className="terminal-shell">
+                  <div className="terminal-shell transcript-lane">
                     <div className="terminal-shell-header">
                       <span className="terminal-dot terminal-red" />
                       <span className="terminal-dot terminal-yellow" />
@@ -535,13 +502,16 @@ export function Dashboard(props: DashboardProps) {
                     <pre className="terminal-screen">{terminalText || "Waiting for terminal output..."}</pre>
                   </div>
                 ) : sessionEvents.length === 0 ? (
-                  <div className="message-system">No messages yet. This session is either brand new or plotting.</div>
+                  <div className="empty-chat-stage chat-empty-state">
+                    <strong>Ready when you are.</strong>
+                    <span>Send a message to {displayRuntime(activeSession)} and Bridge will keep the session synced across devices.</span>
+                  </div>
                 ) : (
                   transcriptCards.map(({ event, card }) => {
                     const isUser = event.kind === "input";
                     if (card.type === "approval") {
                       return (
-                        <article key={event.id} className="message-card message-card-approval">
+                        <article key={event.id} className="message-card message-card-approval transcript-lane">
                           <div className="message-card-top">
                             <span className="message-card-icon">!</span>
                             <div>
@@ -559,7 +529,7 @@ export function Dashboard(props: DashboardProps) {
                     }
                     if (card.type === "tool" || card.type === "command" || card.type === "file" || card.type === "status") {
                       return (
-                        <article key={event.id} className={`message-card message-card-${card.type}`}>
+                        <article key={event.id} className={`message-card message-card-${card.type} transcript-lane`}>
                           <div className="message-card-top">
                             <span className="message-card-icon">
                               {card.type === "tool" ? "◉" : card.type === "command" ? ">" : card.type === "file" ? "#" : "•"}
@@ -574,7 +544,7 @@ export function Dashboard(props: DashboardProps) {
                       );
                     }
                     return (
-                      <article key={event.id} className={`message-bubble ${isUser ? "message-user" : "message-default"}`}>
+                      <article key={event.id} className={`message-bubble ${isUser ? "message-user" : "message-default"} transcript-lane`}>
                         <div className="message-kind">{isUser ? "You" : displayRuntime(activeSession)}</div>
                         <pre>{event.data}</pre>
                         <div className="message-meta">{formatTime(event.at)}</div>
@@ -583,7 +553,7 @@ export function Dashboard(props: DashboardProps) {
                   })
                 )}
                 {thinking && activeSession.runtime !== "terminal-session" ? (
-                  <div className="thinking-block">
+                  <div className="thinking-block transcript-lane">
                     <div className="thinking-avatar">{displayRuntime(activeSession).slice(0, 1)}</div>
                     <div className="thinking-card">
                       <div className="thinking-label">{displayRuntime(activeSession)} is thinking</div>
@@ -614,9 +584,9 @@ export function Dashboard(props: DashboardProps) {
               </footer>
             </>
           ) : (
-            <div className="empty-chat-stage">
-              <strong>No active chat yet</strong>
-              <span>Pick a session on the left, or launch one from a connected machine.</span>
+            <div className="empty-chat-stage chat-empty-state">
+              <strong>Ready when you are.</strong>
+              <span>Pick a chat on the left, or start a new Codex, Claude, Gemini, or Terminal session.</span>
             </div>
           )}
         </main>
@@ -682,6 +652,8 @@ export function Dashboard(props: DashboardProps) {
           </div>
         </aside>
       </div>
+
+      {settingsOpen ? <button className="settings-backdrop" onClick={onToggleSettings} type="button" aria-label="Close settings" /> : null}
     </section>
   );
 }

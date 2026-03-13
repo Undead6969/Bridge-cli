@@ -117,7 +117,7 @@ describe("Dashboard", () => {
 
     expect(html).toContain("laptop");
     expect(html).toContain("Bridge");
-    expect(html).toContain("Sessions");
+    expect(html).toContain("Your chats");
     expect(html).toContain("Codex");
   });
 });
