@@ -10,7 +10,7 @@ import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
 
 const baseUrl = process.env.BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
-const appUrl = process.env.BRIDGE_APP_URL ?? "https://app-web-sand.vercel.app";
+const appUrl = process.env.BRIDGE_APP_URL ?? "https://bridge-cli.vercel.app";
 const auth = readAuthToken();
 const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
@@ -57,8 +57,8 @@ async function waitForHealthy(url: string, timeoutMs = 15_000): Promise<void> {
 function spawnWorkspaceCommand(name: "server" | "daemon"): ChildProcess {
   const scriptPath =
     name === "server"
-      ? resolve(bridgeRoot, "packages", "server", "dist", "index.js")
-      : resolve(bridgeRoot, "packages", "daemon-cli", "dist", "index.js");
+      ? resolve(bridgeRoot, "packages", "server", "dist", "server", "src", "index.js")
+      : resolve(bridgeRoot, "packages", "daemon-cli", "dist", "daemon-cli", "src", "index.js");
 
   if (existsSync(scriptPath)) {
     const child = spawn(process.execPath, [scriptPath], {
@@ -122,6 +122,10 @@ async function createTunnel(serverUrl: string, subdomain?: string): Promise<{
   url: string;
   close: () => void;
 }> {
+  if (existsSync("/opt/homebrew/bin/cloudflared") || existsSync("/usr/local/bin/cloudflared")) {
+    return createCloudflareTunnel(serverUrl);
+  }
+
   const parsed = new URL(serverUrl);
   const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
   const tunnel = await localtunnel({
@@ -132,6 +136,50 @@ async function createTunnel(serverUrl: string, subdomain?: string): Promise<{
   return {
     url: tunnel.url,
     close: () => tunnel.close()
+  };
+}
+
+async function createCloudflareTunnel(serverUrl: string): Promise<{
+  url: string;
+  close: () => void;
+}> {
+  const executable = existsSync("/opt/homebrew/bin/cloudflared") ? "/opt/homebrew/bin/cloudflared" : "cloudflared";
+  const child = spawn(executable, ["tunnel", "--url", serverUrl, "--no-autoupdate"], {
+    cwd: bridgeRoot,
+    env: process.env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+
+  const url = await new Promise<string>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("Timed out waiting for cloudflared tunnel URL"));
+    }, 15_000);
+
+    const onChunk = (chunk: Buffer) => {
+      const text = chunk.toString();
+      const match = text.match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
+      if (match) {
+        clearTimeout(timeout);
+        resolve(match[0]);
+      }
+    };
+
+    child.stdout?.on("data", onChunk);
+    child.stderr?.on("data", onChunk);
+    child.on("exit", (code) => {
+      clearTimeout(timeout);
+      reject(new Error(`cloudflared exited before a tunnel URL was ready (code ${code ?? "unknown"})`));
+    });
+    child.on("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+  });
+
+  return {
+    url,
+    close: () => child.kill("SIGTERM")
   };
 }
 
@@ -158,8 +206,9 @@ async function resolvePublicServerUrl(options?: { useTunnel?: boolean; serverUrl
 
 async function printPairing(label: string, options?: { useTunnel?: boolean; serverUrl?: string; subdomain?: string }): Promise<void> {
   const exposure = await resolvePublicServerUrl(options);
-  const publicSdk = new BridgeSdk(exposure.serverUrl);
-  const pairing = await publicSdk.createPairing(label);
+  const pairingServerUrl =
+    options?.serverUrl || process.env.BRIDGE_PUBLIC_SERVER_URL || !isLoopbackUrl(baseUrl) ? exposure.serverUrl : baseUrl;
+  const pairing = await new BridgeSdk(pairingServerUrl).createPairing(label);
   const url = new URL(appUrl);
   url.searchParams.set("pairCode", pairing.code);
   url.searchParams.set("serverUrl", exposure.serverUrl);
