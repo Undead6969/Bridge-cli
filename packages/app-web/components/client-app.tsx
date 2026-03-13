@@ -9,12 +9,16 @@ const tokenKey = "bridge-auth-token";
 const serverUrlKey = "bridge-server-url";
 const notificationsKey = "bridge-notifications-enabled";
 
+function requiresTunnelBypass(baseUrl: string): boolean {
+  return /\.loca\.lt$/i.test(new URL(baseUrl).hostname);
+}
+
 async function fetchJson<T>(base: string, path: string, token?: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${base}${path}`, {
     ...init,
     headers: {
       "content-type": "application/json",
-      "bypass-tunnel-reminder": "bridge",
+      ...(requiresTunnelBypass(base) ? { "bypass-tunnel-reminder": "bridge" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers ?? {})
     }

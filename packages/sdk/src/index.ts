@@ -26,6 +26,10 @@ async function json<T>(response: Response, parser: { parse: (value: unknown) => 
   return parser.parse(await response.json());
 }
 
+function requiresTunnelBypass(baseUrl: string): boolean {
+  return /\.loca\.lt$/i.test(new URL(baseUrl).hostname);
+}
+
 export class BridgeSdk {
   constructor(
     private readonly baseUrl: string,
@@ -34,7 +38,7 @@ export class BridgeSdk {
 
   private headers(): Record<string, string> {
     return {
-      "bypass-tunnel-reminder": "bridge",
+      ...(requiresTunnelBypass(this.baseUrl) ? { "bypass-tunnel-reminder": "bridge" } : {}),
       ...(this.token ? { Authorization: `Bearer ${this.token}` } : {})
     };
   }
