@@ -1,5 +1,7 @@
 import { daemonCommandSchema, daemonEventSchema, type MachineCapabilities, type PowerPolicy, type SessionSpec } from "@bridge/protocol";
 import { randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import WebSocket from "ws";
 import type { SessionManager } from "./sessions.js";
 
@@ -104,5 +106,18 @@ export class DaemonRelay {
 }
 
 export function createMachineId(): string {
-  return process.env.BRIDGE_MACHINE_ID ?? `machine-${randomUUID()}`;
+  if (process.env.BRIDGE_MACHINE_ID) {
+    return process.env.BRIDGE_MACHINE_ID;
+  }
+  const machineIdFile = resolve(process.cwd(), ".bridge", "machine-id");
+  if (existsSync(machineIdFile)) {
+    const value = readFileSync(machineIdFile, "utf8").trim();
+    if (value) {
+      return value;
+    }
+  }
+  const value = `machine-${randomUUID()}`;
+  mkdirSync(dirname(machineIdFile), { recursive: true });
+  writeFileSync(machineIdFile, `${value}\n`, "utf8");
+  return value;
 }

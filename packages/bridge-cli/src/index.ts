@@ -1,21 +1,25 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { homedir } from "node:os";
+import { randomInt } from "node:crypto";
+import { createInterface } from "node:readline/promises";
 import { Command } from "commander";
 import localtunnel from "localtunnel";
 import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
 
 const baseUrl = process.env.BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
-const appUrl = process.env.BRIDGE_APP_URL ?? "https://app-web-sand.vercel.app";
+const appUrl = process.env.BRIDGE_APP_URL ?? "https://bridge-cli.vercel.app";
 const auth = readAuthToken();
 const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
 const currentFile = fileURLToPath(import.meta.url);
 const bridgeRoot = resolve(dirname(currentFile), "..", "..", "..");
+const telegramConfigPath = resolve(homedir(), ".bridge", "telegram.json");
 
 program.name("bridge").description("Remote scripting and session-control CLI");
 
@@ -32,6 +36,22 @@ type PairingStatus = {
   expiresAt: number;
   consumedAt?: number;
   tokenLabel?: string;
+};
+
+type TelegramConfig = {
+  botToken: string;
+  botUsername?: string;
+  serverUrl: string;
+  bridgeToken: string;
+  appUrl: string;
+  linkCode: string;
+  allowedChatIds: number[];
+  pollOffset?: number;
+  defaultMachineId?: string;
+  currentMachineByChat: Record<string, string>;
+  currentWorkspaceByChat: Record<string, string>;
+  currentSessionByChat: Record<string, string>;
+  updatedAt: number;
 };
 
 function logServiceOutput(name: string, child: ChildProcess): void {
@@ -62,11 +82,13 @@ async function waitForHealthy(url: string, timeoutMs = 15_000): Promise<void> {
   }
 }
 
-function spawnWorkspaceCommand(name: "server" | "daemon"): ChildProcess {
+function spawnWorkspaceCommand(name: "server" | "daemon" | "telegram"): ChildProcess {
   const scriptPath =
     name === "server"
       ? resolve(bridgeRoot, "packages", "server", "dist", "server", "src", "index.js")
-      : resolve(bridgeRoot, "packages", "daemon-cli", "dist", "daemon-cli", "src", "index.js");
+      : name === "daemon"
+        ? resolve(bridgeRoot, "packages", "daemon-cli", "dist", "daemon-cli", "src", "index.js")
+        : resolve(bridgeRoot, "packages", "telegram-bot", "dist", "telegram-bot", "src", "index.js");
 
   if (existsSync(scriptPath)) {
     const child = spawn(process.execPath, [scriptPath], {
@@ -78,7 +100,7 @@ function spawnWorkspaceCommand(name: "server" | "daemon"): ChildProcess {
     return child;
   }
 
-  const filter = name === "server" ? "@bridge/server" : "@bridge/daemon";
+  const filter = name === "server" ? "@bridge/server" : name === "daemon" ? "@bridge/daemon" : "@bridge/telegram-bot";
   const child = spawn("corepack", ["pnpm", "--filter", filter, "dev"], {
     cwd: bridgeRoot,
     env: process.env,
@@ -321,6 +343,153 @@ async function hostMode(options?: {
   });
 }
 
+function createFreshLinkCode(): string {
+  return String(randomInt(100000, 1_000_000));
+}
+
+async function mintFreshToken(label: string, serverUrl = baseUrl): Promise<{ token: string; label: string; createdAt: number; lastUsedAt: number }> {
+  const publicSdk = new BridgeSdk(serverUrl);
+  const pairing = await publicSdk.createPairing(label);
+  return publicSdk.exchangePairing(pairing.code, label);
+}
+
+async function reauthenticateCli(label = "bridge-cli"): Promise<void> {
+  await ensureLocalServices({ startServer: true, startDaemon: false });
+  clearAuthToken();
+  const token = await mintFreshToken(label, baseUrl);
+  writeAuthToken(token);
+  console.log(`Re-authenticated as ${token.label}. The CLI now has fresh credentials and fewer excuses.\n`);
+  console.log(JSON.stringify(token, null, 2));
+}
+
+async function prompt(question: string, fallback = ""): Promise<string> {
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout
+  });
+  try {
+    const suffix = fallback ? ` (${fallback})` : "";
+    const answer = await rl.question(`${question}${suffix}: `);
+    return answer.trim() || fallback;
+  } finally {
+    rl.close();
+  }
+}
+
+async function fetchTelegramMe(botToken: string): Promise<{ username?: string; first_name?: string }> {
+  const response = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
+    method: "POST"
+  });
+  const payload = (await response.json()) as { ok: boolean; result?: { username?: string; first_name?: string }; description?: string };
+  if (!payload.ok || !payload.result) {
+    throw new Error(payload.description ?? "Telegram rejected the bot token");
+  }
+  return payload.result;
+}
+
+async function setupTelegramBot(options?: { startAfterSetup?: boolean }): Promise<void> {
+  await ensureLocalServices({ startServer: true, startDaemon: true });
+  const botToken = await prompt("Telegram bot token");
+  if (!botToken) {
+    throw new Error("Telegram bot token is required");
+  }
+
+  const me = await fetchTelegramMe(botToken);
+  const serverUrl = await prompt("Bridge server URL for the bot", baseUrl);
+  const appForBot = await prompt("Bridge web app URL", appUrl);
+  const existingConfig = existsSync(telegramConfigPath);
+  const bridgeToken = (await mintFreshToken("bridge-telegram-bot", serverUrl)).token;
+  const linkCode = createFreshLinkCode();
+  const config: TelegramConfig = {
+    botToken,
+    botUsername: me.username,
+    serverUrl,
+    bridgeToken,
+    appUrl: appForBot,
+    linkCode,
+    allowedChatIds: [],
+    pollOffset: undefined,
+    defaultMachineId: undefined,
+    currentMachineByChat: {},
+    currentWorkspaceByChat: {},
+    currentSessionByChat: {},
+    updatedAt: Date.now()
+  };
+
+  mkdirSync(dirname(telegramConfigPath), { recursive: true });
+  writeFileSync(telegramConfigPath, JSON.stringify(config, null, 2));
+
+  console.log(`Telegram bot ${me.username ? `@${me.username}` : "(username not reported)"} is configured.`);
+  if (me.username) {
+    console.log(`Open: https://t.me/${me.username}?start=${linkCode}`);
+  }
+  console.log(`Or message the bot with: /start ${linkCode}`);
+  console.log(existingConfig ? "Previous Telegram config was replaced. The old one died so the new one could be dramatic." : "Telegram setup saved.");
+
+  if (options?.startAfterSetup) {
+    await startTelegramBot();
+  }
+}
+
+async function startTelegramBot(): Promise<void> {
+  if (!existsSync(telegramConfigPath)) {
+    throw new Error(`Telegram is not configured yet. Run \`bridge telegram setup\` first.`);
+  }
+  const child = spawnWorkspaceCommand("telegram");
+  child.on("exit", (code) => {
+    process.exitCode = code ?? 0;
+  });
+  await new Promise(() => undefined);
+}
+
+async function launcherMenu(): Promise<void> {
+  console.log("\nBridge launcher\n");
+  console.log("1. Pair phone/web and host locally");
+  console.log("2. Set up Telegram bot");
+  console.log("3. Start Telegram bot");
+  console.log("4. Re-authenticate this CLI");
+  console.log("5. Doctor / diagnostics");
+  console.log("6. Quit\n");
+
+  const choice = await prompt("Pick an option", "1");
+  switch (choice) {
+    case "1":
+      await hostMode({ label: "bridge", useTunnel: true });
+      return;
+    case "2":
+      await setupTelegramBot();
+      return;
+    case "3":
+      await startTelegramBot();
+      return;
+    case "4":
+      await reauthenticateCli();
+      return;
+    case "5":
+      console.log(
+        JSON.stringify(
+          {
+            checks: await Promise.all([
+              fetch(`${baseUrl}/health`)
+                .then((response) => ({ name: "server", ok: response.ok, url: baseUrl }))
+                .catch(() => ({ name: "server", ok: false, url: baseUrl })),
+              fetch("http://127.0.0.1:8790/machine/capabilities")
+                .then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" }))
+                .catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
+            ]),
+            hostedApp: appUrl,
+            telegramConfigured: existsSync(telegramConfigPath)
+          },
+          null,
+          2
+        )
+      );
+      return;
+    default:
+      console.log("Bridge launcher closed. No QRs were harmed in the making of this decision.");
+  }
+}
+
 const authCommand = program.command("auth").description("Pairing code auth");
 
 authCommand
@@ -401,6 +570,14 @@ program
   });
 
 program
+  .command("reauth")
+  .description("Rotate the saved CLI auth token")
+  .option("--label <label>", "Label for the refreshed CLI token", "bridge-cli")
+  .action(async (options) => {
+    await reauthenticateCli(options.label);
+  });
+
+program
   .command("doctor")
   .description("Check server and daemon reachability")
   .action(async () => {
@@ -419,12 +596,30 @@ program
           hostedApp: appUrl,
           publicServerUrl: process.env.BRIDGE_PUBLIC_SERVER_URL ?? null,
           tunnelMode: process.env.BRIDGE_PUBLIC_SERVER_URL ? "disabled (explicit public server)" : isLoopbackUrl(baseUrl) ? "available on demand" : "not needed",
-          authLabel: auth?.label ?? null
+          authLabel: auth?.label ?? null,
+          telegramConfigured: existsSync(telegramConfigPath)
         },
         null,
         2
       )
     );
+  });
+
+const telegram = program.command("telegram").description("Telegram bot setup and runtime");
+
+telegram
+  .command("setup")
+  .description("Configure the Telegram bot and create a Bridge auth token for it")
+  .option("--start", "Start the bot immediately after setup")
+  .action(async (options) => {
+    await setupTelegramBot({ startAfterSetup: options.start });
+  });
+
+telegram
+  .command("start")
+  .description("Start the configured Telegram bot")
+  .action(async () => {
+    await startTelegramBot();
   });
 
 program
@@ -547,7 +742,11 @@ program
   });
 
 if (process.argv.length <= 2) {
-  await hostMode({ label: "bridge", useTunnel: true });
+  if (process.stdin.isTTY && process.stdout.isTTY) {
+    await launcherMenu();
+  } else {
+    await hostMode({ label: "bridge", useTunnel: true });
+  }
 } else {
   await program.parseAsync(process.argv);
 }

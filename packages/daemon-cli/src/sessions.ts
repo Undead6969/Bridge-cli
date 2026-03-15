@@ -93,6 +93,11 @@ function summarizeOutput(data: string): Partial<Pick<SessionRecord, "status" | "
   };
 }
 
+function looksLikeCodexTrustPrompt(data: string): boolean {
+  const compact = data.replace(/\s+/g, "");
+  return /Doyoutrustthecontentsofthisdirectory\?/i.test(compact) && /Pressentertocontinue/i.test(compact);
+}
+
 function normalizeTerminalInput(data: string): string {
   return data.replace(/\r?\n/g, "\r");
 }
@@ -132,6 +137,37 @@ function createPythonPtyProgram(cols: number, rows: number): string {
 
 export class SessionManager extends EventEmitter<SessionManagerEvents> {
   private sessions = new Map<string, ManagedSession>();
+  private readinessTimers = new Map<string, NodeJS.Timeout>();
+  private trustPromptBuffers = new Map<string, string>();
+  private trustPromptAccepted = new Set<string>();
+
+  private stripAnsi(data: string): string {
+    return data
+      .replace(/\u001b\][^\u0007]*(?:\u0007|\u001b\\)/g, "")
+      .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "")
+      .replace(/\u001b[@-_]/g, "");
+  }
+
+  private markAgentReady(sessionId: string, reason = "agent session is interactive"): void {
+    const session = this.sessions.get(sessionId);
+    if (!session || session.runtime !== "agent-session") {
+      return;
+    }
+    if (session.status === "waiting" || session.status === "completed" || session.status === "stopped") {
+      return;
+    }
+    session.status = "waiting";
+    session.attention = "needs-review";
+    session.updatedAt = Date.now();
+    session.lastEventAt = session.updatedAt;
+    this.emit(
+      "session.event",
+      createEvent(sessionId, "ready", reason, {
+        backend: session.terminalBackend
+      })
+    );
+    this.emitSessionUpdated(sessionId);
+  }
 
   private emitSessionUpdated(sessionId: string): void {
     const session = this.get(sessionId);
@@ -171,6 +207,8 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       pendingApprovals: new Map()
     };
 
+    this.sessions.set(session.id, session);
+
     if (spec.runtime === "agent-session") {
       this.createAgentRuntime(session, spec);
     } else {
@@ -178,10 +216,37 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     }
 
     session.status = "running";
-    this.sessions.set(session.id, session);
+    if (spec.runtime === "agent-session") {
+      this.scheduleAgentReadyFallback(session.id);
+    }
     this.emit("session.started", this.get(session.id)!);
 
     return this.get(session.id)!;
+  }
+
+  private clearReadinessTimer(sessionId: string): void {
+    const timer = this.readinessTimers.get(sessionId);
+    if (!timer) {
+      return;
+    }
+    clearTimeout(timer);
+    this.readinessTimers.delete(sessionId);
+  }
+
+  private scheduleAgentReadyFallback(sessionId: string): void {
+    this.clearReadinessTimer(sessionId);
+    const timer = setTimeout(() => {
+      this.readinessTimers.delete(sessionId);
+      const session = this.sessions.get(sessionId);
+      if (!session || session.runtime !== "agent-session") {
+        return;
+      }
+      if (session.status !== "running" && session.status !== "starting") {
+        return;
+      }
+      this.markAgentReady(sessionId);
+    }, 900);
+    this.readinessTimers.set(sessionId, timer);
   }
 
   private createAgentRuntime(session: ManagedSession, spec: Extract<SessionSpec, { runtime: "agent-session" }>): void {
@@ -205,6 +270,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         this.handleChunk(session.id, "stdout", data);
       });
       session.pty.onExit(({ exitCode, signal }) => {
+        this.clearReadinessTimer(session.id);
         const current = this.sessions.get(session.id);
         if (!current) {
           return;
@@ -247,6 +313,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       this.handleChunk(session.id, "stderr", chunk.toString());
     });
     session.child.on("exit", (code, signal) => {
+      this.clearReadinessTimer(session.id);
       const current = this.sessions.get(session.id);
       if (!current) {
         return;
@@ -276,6 +343,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         this.handleChunk(session.id, "stdout", data);
       });
       session.pty.onExit(({ exitCode, signal }) => {
+        this.clearReadinessTimer(session.id);
         const current = this.sessions.get(session.id);
         if (!current) {
           return;
@@ -327,6 +395,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       this.handleChunk(session.id, "stderr", chunk.toString());
     });
     session.child.on("exit", (code, signal) => {
+      this.clearReadinessTimer(session.id);
       const current = this.sessions.get(session.id);
       if (!current) {
         return;
@@ -356,6 +425,49 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session) {
       return;
     }
+    const plainText = this.stripAnsi(data);
+    if (session.runtime === "agent-session" && kind === "stdout") {
+      const previous = this.trustPromptBuffers.get(sessionId) ?? "";
+      const combined = `${previous}${plainText}`.slice(-1200);
+      this.trustPromptBuffers.set(sessionId, combined);
+      if (!this.trustPromptAccepted.has(sessionId) && looksLikeCodexTrustPrompt(combined)) {
+        this.trustPromptAccepted.add(sessionId);
+        this.emit(
+          "session.event",
+          createEvent(
+            sessionId,
+            "system",
+            "Codex asked whether to trust this workspace. Bridge accepted the default continue option so the session can actually start."
+          )
+        );
+        if (session.pty) {
+          session.pty.write("\r");
+        } else if (session.child?.stdin) {
+          session.child.stdin.write("\r");
+        }
+      }
+    }
+    if (session.runtime === "agent-session" && kind === "stdout" && looksLikeCodexTrustPrompt(plainText)) {
+      this.emit(
+        "session.event",
+        createEvent(
+          sessionId,
+          "system",
+          "Codex asked whether to trust this workspace. Bridge accepted the default continue option so the session can actually start."
+        )
+      );
+      if (session.pty) {
+        session.pty.write("\r");
+      } else if (session.child?.stdin) {
+        session.child.stdin.write("\r");
+      }
+    }
+    if (session.runtime === "agent-session" && kind === "stdout" && data.trim().length > 0) {
+      this.clearReadinessTimer(sessionId);
+      if (!looksLikeCodexTrustPrompt(this.trustPromptBuffers.get(sessionId) ?? plainText)) {
+        this.markAgentReady(sessionId, "agent output detected");
+      }
+    }
     session.updatedAt = Date.now();
     session.lastEventAt = session.updatedAt;
     this.emit("session.event", createEvent(sessionId, kind, data));
@@ -375,7 +487,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     const summary = summarizeOutput(data);
-    session.status = summary.status ?? session.status;
+    if (!(session.status === "waiting" && summary.status === "running")) {
+      session.status = summary.status ?? session.status;
+    }
     session.attention = summary.attention ?? session.attention;
     if (summary.eventKind) {
       this.emit("session.event", createEvent(sessionId, summary.eventKind, data));
@@ -449,6 +563,9 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!session) {
       throw new Error(`Unknown session ${sessionId}`);
     }
+    this.clearReadinessTimer(sessionId);
+    this.trustPromptBuffers.delete(sessionId);
+    this.trustPromptAccepted.delete(sessionId);
     session.pty?.kill();
     session.child?.kill("SIGTERM");
     session.status = "stopped";

@@ -23,6 +23,11 @@ cat >"$BIN_DIR/bridge-server" <<EOF
 exec node "$ROOT_DIR/packages/server/dist/server/src/index.js" "\$@"
 EOF
 
-chmod +x "$BIN_DIR/bridge" "$BIN_DIR/bridge-daemon" "$BIN_DIR/bridge-server"
+cat >"$BIN_DIR/bridge-telegram" <<EOF
+#!/bin/sh
+exec node "$ROOT_DIR/packages/telegram-bot/dist/telegram-bot/src/index.js" "\$@"
+EOF
+
+chmod +x "$BIN_DIR/bridge" "$BIN_DIR/bridge-daemon" "$BIN_DIR/bridge-server" "$BIN_DIR/bridge-telegram"
 
 echo "Installed bridge commands to $BIN_DIR"

@@ -200,6 +200,34 @@ importers:
         specifier: ^3.2.4
         version: 3.2.4(@types/node@24.12.0)(jiti@2.6.1)(lightningcss@1.31.1)(tsx@4.21.0)
 
+  packages/telegram-bot:
+    dependencies:
+      '@bridge/sdk':
+        specifier: workspace:*
+        version: link:../sdk
+      ws:
+        specifier: ^8.18.3
+        version: 8.19.0
+      zod:
+        specifier: ^3.25.76
+        version: 3.25.76
+    devDependencies:
+      '@types/node':
+        specifier: ^24.9.1
+        version: 24.12.0
+      '@types/ws':
+        specifier: ^8.18.1
+        version: 8.18.1
+      tsx:
+        specifier: ^4.20.6
+        version: 4.21.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+      vitest:
+        specifier: ^3.2.4
+        version: 3.2.4(@types/node@24.12.0)(jiti@2.6.1)(lightningcss@1.31.1)(tsx@4.21.0)
+
 packages:
 
   '@alloc/quick-lru@5.2.0':
