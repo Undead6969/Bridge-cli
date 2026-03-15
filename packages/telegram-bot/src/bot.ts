@@ -72,6 +72,7 @@ async function setCommands(botToken: string): Promise<void> {
   await telegramApi(botToken, "setMyCommands", {
     commands: [
       { command: "start", description: "Link this chat to Bridge" },
+      { command: "login", description: "Use a one-time Bridge login code" },
       { command: "help", description: "Show command help" },
       { command: "machines", description: "List machines" },
       { command: "use_machine", description: "Select a machine by id or index" },
@@ -84,6 +85,7 @@ async function setCommands(botToken: string): Promise<void> {
       { command: "send", description: "Send text to the current session" },
       { command: "tail", description: "Show recent session output" },
       { command: "status", description: "Show current Bridge context" },
+      { command: "logout", description: "Unlink this Telegram chat" },
       { command: "stop", description: "Stop the current session" },
       { command: "open", description: "Open the web app" }
     ]
@@ -109,6 +111,14 @@ function isAuthorized(config: TelegramConfig, chatId: number): boolean {
   return config.allowedChatIds.includes(chatId);
 }
 
+function pruneLoginCodes(config: TelegramConfig): TelegramConfig {
+  const now = Date.now();
+  return {
+    ...config,
+    loginCodes: config.loginCodes.filter((entry) => !entry.usedAt && entry.expiresAt > now)
+  };
+}
+
 function authorizeChat(config: TelegramConfig, chatId: number): TelegramConfig {
   if (config.allowedChatIds.includes(chatId)) {
     return config;
@@ -117,6 +127,20 @@ function authorizeChat(config: TelegramConfig, chatId: number): TelegramConfig {
     ...config,
     allowedChatIds: [...config.allowedChatIds, chatId]
   };
+}
+
+function consumeLoginCode(config: TelegramConfig, input: string): TelegramConfig | null {
+  const now = Date.now();
+  const index = config.loginCodes.findIndex((entry) => entry.code === input && !entry.usedAt && entry.expiresAt > now);
+  if (index === -1) {
+    return null;
+  }
+  const next = structuredClone(config);
+  next.loginCodes[index] = {
+    ...next.loginCodes[index],
+    usedAt: now
+  };
+  return next;
 }
 
 function getMachineChoices(sdk: BridgeSdk) {
@@ -196,6 +220,7 @@ async function formatSessionTail(config: TelegramConfig, sessionId: string): Pro
 function helpText(config: TelegramConfig): string {
   return [
     "Bridge Telegram controls:",
+    "/login <one-time-code> - link this Telegram chat",
     "/machines - list machines",
     "/use_machine <index|machineId> - select a machine",
     "/workspaces - list recent workspaces",
@@ -207,6 +232,7 @@ function helpText(config: TelegramConfig): string {
     "/send <message> - send input to the selected session",
     "/tail - show recent session output",
     "/status - show the current machine/workspace/session",
+    "/logout - unlink this Telegram chat",
     "/stop - stop the selected session",
     `/open - open ${config.appUrl}`
   ].join("\n");
@@ -223,6 +249,15 @@ async function handleAuthorizedCommand(
 
   if (name === "help") {
     await sendMessage(config.botToken, chatId, helpText(config));
+    return;
+  }
+
+  if (name === "logout") {
+    writeTelegramConfig({
+      ...config,
+      allowedChatIds: config.allowedChatIds.filter((id) => id !== chatId)
+    });
+    await sendMessage(config.botToken, chatId, "This chat is unlinked. Dramatic exit achieved.");
     return;
   }
 
@@ -448,37 +483,55 @@ async function handleUpdate(update: TelegramUpdate): Promise<void> {
     return;
   }
 
+  const prunedConfig = pruneLoginCodes(config);
+  if (prunedConfig.loginCodes.length !== config.loginCodes.length) {
+    writeTelegramConfig(prunedConfig);
+  }
+
   const chatId = update.message.chat.id;
   const parsed = parseCommand(update.message.text);
   if (!parsed) {
-    if (isAuthorized(config, chatId)) {
-      await sendMessage(config.botToken, chatId, "Use slash commands here. Telegram freeform chat is charming, but Bridge likes verbs.");
+    if (isAuthorized(prunedConfig, chatId)) {
+      await sendMessage(prunedConfig.botToken, chatId, "Use slash commands here. Telegram freeform chat is charming, but Bridge likes verbs.");
     }
     return;
   }
 
-  if (parsed.name === "start" || parsed.name === "link") {
-    if (parsed.args === config.linkCode) {
-      writeTelegramConfig(authorizeChat(config, chatId));
+  if (parsed.name === "start" || parsed.name === "login" || parsed.name === "link") {
+    const linked = parsed.args
+      ? (() => {
+          const next = consumeLoginCode(prunedConfig, parsed.args);
+          if (!next) {
+            return null;
+          }
+          return {
+            ...next,
+            allowedChatIds: [...new Set([...next.allowedChatIds.filter((id) => !Number.isNaN(id)), chatId])]
+          };
+        })()
+      : null;
+
+    if (linked) {
+      writeTelegramConfig(linked);
       await sendMessage(
-        config.botToken,
+        prunedConfig.botToken,
         chatId,
         "Linked. You can now use `/machines`, `/new_codex`, and friends without ceremonial suffering."
       );
       return;
     }
-    if (!isAuthorized(config, chatId)) {
-      await sendMessage(config.botToken, chatId, "This chat is not linked yet. Use the link code from `bridge telegram setup`.");
+    if (!isAuthorized(prunedConfig, chatId)) {
+      await sendMessage(prunedConfig.botToken, chatId, "This chat is not linked yet. Ask the admin for a fresh one-time code from `bridge telegram login-code`.");
       return;
     }
   }
 
-  if (!isAuthorized(config, chatId)) {
-    await sendMessage(config.botToken, chatId, "Unauthorized chat. Use `/start <link-code>` first.");
+  if (!isAuthorized(prunedConfig, chatId)) {
+    await sendMessage(prunedConfig.botToken, chatId, "Unauthorized chat. Use `/start <one-time-code>` or `/login <one-time-code>` first.");
     return;
   }
 
-  await handleAuthorizedCommand(config, chatId, parsed.name, parsed.args);
+  await handleAuthorizedCommand(prunedConfig, chatId, parsed.name, parsed.args);
 }
 
 export async function runTelegramBot(): Promise<void> {

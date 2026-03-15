@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { homedir } from "node:os";
@@ -44,13 +44,19 @@ type TelegramConfig = {
   serverUrl: string;
   bridgeToken: string;
   appUrl: string;
-  linkCode: string;
   allowedChatIds: number[];
   pollOffset?: number;
   defaultMachineId?: string;
   currentMachineByChat: Record<string, string>;
   currentWorkspaceByChat: Record<string, string>;
   currentSessionByChat: Record<string, string>;
+  loginCodes: Array<{
+    code: string;
+    createdAt: number;
+    expiresAt: number;
+    label?: string;
+    usedAt?: number;
+  }>;
   updatedAt: number;
 };
 
@@ -347,6 +353,50 @@ function createFreshLinkCode(): string {
   return String(randomInt(100000, 1_000_000));
 }
 
+function readTelegramConfig(): TelegramConfig | null {
+  if (!existsSync(telegramConfigPath)) {
+    return null;
+  }
+  return JSON.parse(readFileSync(telegramConfigPath, "utf8")) as TelegramConfig;
+}
+
+function writeTelegramConfig(config: TelegramConfig): TelegramConfig {
+  mkdirSync(dirname(telegramConfigPath), { recursive: true });
+  const next = {
+    ...config,
+    updatedAt: Date.now()
+  };
+  writeFileSync(telegramConfigPath, JSON.stringify(next, null, 2));
+  return next;
+}
+
+function issueTelegramLoginCode(config: TelegramConfig, options?: { minutes?: number; label?: string }): {
+  config: TelegramConfig;
+  code: string;
+  expiresAt: number;
+} {
+  const code = createFreshLinkCode();
+  const createdAt = Date.now();
+  const expiresAt = createdAt + (options?.minutes ?? 10) * 60_000;
+  const next = writeTelegramConfig({
+    ...config,
+    loginCodes: [
+      ...(config.loginCodes ?? []).filter((entry) => !entry.usedAt && entry.expiresAt > createdAt),
+      {
+        code,
+        createdAt,
+        expiresAt,
+        label: options?.label
+      }
+    ]
+  });
+  return {
+    config: next,
+    code,
+    expiresAt
+  };
+}
+
 async function mintFreshToken(label: string, serverUrl = baseUrl): Promise<{ token: string; label: string; createdAt: number; lastUsedAt: number }> {
   const publicSdk = new BridgeSdk(serverUrl);
   const pairing = await publicSdk.createPairing(label);
@@ -387,47 +437,65 @@ async function fetchTelegramMe(botToken: string): Promise<{ username?: string; f
   return payload.result;
 }
 
-async function setupTelegramBot(options?: { startAfterSetup?: boolean }): Promise<void> {
+async function setupTelegramBot(options?: {
+  startAfterSetup?: boolean;
+  botToken?: string;
+  serverUrl?: string;
+  appUrl?: string;
+  autoConfirm?: boolean;
+}): Promise<void> {
   await ensureLocalServices({ startServer: true, startDaemon: true });
-  const botToken = await prompt("Telegram bot token");
+  const botToken = options?.botToken ?? (options?.autoConfirm ? "" : await prompt("Telegram bot token"));
   if (!botToken) {
     throw new Error("Telegram bot token is required");
   }
 
   const me = await fetchTelegramMe(botToken);
-  const serverUrl = await prompt("Bridge server URL for the bot", baseUrl);
-  const appForBot = await prompt("Bridge web app URL", appUrl);
+  const serverUrl = options?.serverUrl ?? (options?.autoConfirm ? baseUrl : await prompt("Bridge server URL for the bot", baseUrl));
+  const appForBot = options?.appUrl ?? (options?.autoConfirm ? appUrl : await prompt("Bridge web app URL", appUrl));
   const existingConfig = existsSync(telegramConfigPath);
   const bridgeToken = (await mintFreshToken("bridge-telegram-bot", serverUrl)).token;
-  const linkCode = createFreshLinkCode();
-  const config: TelegramConfig = {
+  const config = writeTelegramConfig({
     botToken,
     botUsername: me.username,
     serverUrl,
     bridgeToken,
     appUrl: appForBot,
-    linkCode,
     allowedChatIds: [],
     pollOffset: undefined,
     defaultMachineId: undefined,
     currentMachineByChat: {},
     currentWorkspaceByChat: {},
     currentSessionByChat: {},
+    loginCodes: [],
     updatedAt: Date.now()
-  };
-
-  mkdirSync(dirname(telegramConfigPath), { recursive: true });
-  writeFileSync(telegramConfigPath, JSON.stringify(config, null, 2));
+  });
+  const login = issueTelegramLoginCode(config, { minutes: 15, label: "initial setup" });
 
   console.log(`Telegram bot ${me.username ? `@${me.username}` : "(username not reported)"} is configured.`);
   if (me.username) {
-    console.log(`Open: https://t.me/${me.username}?start=${linkCode}`);
+    console.log(`Open: https://t.me/${me.username}?start=${login.code}`);
   }
-  console.log(`Or message the bot with: /start ${linkCode}`);
+  console.log(`Or message the bot with: /start ${login.code}`);
+  console.log(`That login code expires in 15 minutes and works once, because permanent shared secrets are just future incidents wearing shoes.`);
   console.log(existingConfig ? "Previous Telegram config was replaced. The old one died so the new one could be dramatic." : "Telegram setup saved.");
 
   if (options?.startAfterSetup) {
     await startTelegramBot();
+  }
+}
+
+function printTelegramLoginCode(minutes = 15, label?: string): void {
+  const config = readTelegramConfig();
+  if (!config) {
+    throw new Error("Telegram is not configured yet. Run `bridge telegram setup` first.");
+  }
+  const issued = issueTelegramLoginCode(config, { minutes, label });
+  const expiresAt = new Date(issued.expiresAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
+  console.log(`Telegram login code: ${issued.code}`);
+  console.log(`Expires: ${expiresAt}`);
+  if (issued.config.botUsername) {
+    console.log(`Deep link: https://t.me/${issued.config.botUsername}?start=${issued.code}`);
   }
 }
 
@@ -610,9 +678,19 @@ const telegram = program.command("telegram").description("Telegram bot setup and
 telegram
   .command("setup")
   .description("Configure the Telegram bot and create a Bridge auth token for it")
+  .option("--bot-token <token>", "Telegram bot token")
+  .option("--server-url <url>", "Bridge server URL the bot should use", baseUrl)
+  .option("--app-url <url>", "Bridge web app URL the bot should send back", appUrl)
+  .option("--yes", "Skip prompts and use the provided/default values")
   .option("--start", "Start the bot immediately after setup")
   .action(async (options) => {
-    await setupTelegramBot({ startAfterSetup: options.start });
+    await setupTelegramBot({
+      startAfterSetup: options.start,
+      botToken: options.botToken,
+      serverUrl: options.serverUrl,
+      appUrl: options.appUrl,
+      autoConfirm: options.yes
+    });
   });
 
 telegram
@@ -620,6 +698,15 @@ telegram
   .description("Start the configured Telegram bot")
   .action(async () => {
     await startTelegramBot();
+  });
+
+telegram
+  .command("login-code")
+  .description("Generate a one-time Telegram login code")
+  .option("--minutes <minutes>", "How long the code should stay valid", "15")
+  .option("--label <label>", "Optional note for this code")
+  .action(async (options) => {
+    printTelegramLoginCode(Number(options.minutes), options.label);
   });
 
 program

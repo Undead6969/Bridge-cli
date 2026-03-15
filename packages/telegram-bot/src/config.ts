@@ -10,13 +10,23 @@ const telegramConfigSchema = z.object({
   serverUrl: z.string().url(),
   bridgeToken: z.string().min(1),
   appUrl: z.string().url(),
-  linkCode: z.string().regex(/^\d{6}$/),
   allowedChatIds: z.array(z.number().int()).default([]),
   pollOffset: z.number().int().optional(),
   defaultMachineId: z.string().optional(),
   currentMachineByChat: z.record(z.string(), z.string()).default({}),
   currentWorkspaceByChat: z.record(z.string(), z.string()).default({}),
   currentSessionByChat: z.record(z.string(), z.string()).default({}),
+  loginCodes: z
+    .array(
+      z.object({
+        code: z.string().regex(/^\d{6}$/),
+        createdAt: z.number(),
+        expiresAt: z.number(),
+        label: z.string().optional(),
+        usedAt: z.number().optional()
+      })
+    )
+    .default([]),
   updatedAt: z.number()
 });
 
