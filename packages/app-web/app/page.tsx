@@ -29,20 +29,23 @@ export default async function Page() {
             version: "5.4-compatible",
             launchable: true,
             supportsRemoteWrapper: true,
-            supportsSessionControl: true
+            supportsSessionControl: true,
+            authState: "authenticated"
           },
           claude: {
             installed: true,
             version: "detected",
             launchable: true,
             supportsRemoteWrapper: true,
-            supportsSessionControl: true
+            supportsSessionControl: true,
+            authState: "unknown"
           },
           gemini: {
             installed: false,
             launchable: false,
             supportsRemoteWrapper: false,
-            supportsSessionControl: false
+            supportsSessionControl: false,
+            authState: "not-installed"
           }
         },
         power: {

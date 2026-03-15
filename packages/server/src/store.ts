@@ -17,6 +17,7 @@ import {
 import { randomInt, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { legacyServerStatePath, localStatePaths } from "./local-state.js";
 
 type PairingRecord = PairingCode & {
   expiresAt: number;
@@ -67,8 +68,9 @@ export class BridgeStore {
   private readonly stateFile: string;
   private state: PersistedState;
 
-  constructor(stateFile = resolve(process.cwd(), ".bridge", "server-state.json")) {
-    this.stateFile = stateFile;
+  constructor(stateFile = localStatePaths.serverState) {
+    const legacyStateFile = legacyServerStatePath();
+    this.stateFile = existsSync(stateFile) ? stateFile : existsSync(legacyStateFile) ? legacyStateFile : stateFile;
     this.state = this.readState();
   }
 
@@ -194,6 +196,7 @@ export class BridgeStore {
       shell: spec.runtime === "terminal-session" ? spec.shell : undefined,
       terminalBackend: undefined,
       startedBy: spec.startedBy,
+      interactive: spec.runtime === "terminal-session",
       lastEventAt: now,
       lastViewedAt: spec.startedBy === "web" || spec.startedBy === "pwa" ? now : undefined,
       unreadCount: 0,

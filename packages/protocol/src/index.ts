@@ -3,6 +3,18 @@ import { z } from "zod";
 export const installedCliSchema = z.enum(["codex", "claude", "gemini"]);
 export type InstalledCli = z.infer<typeof installedCliSchema>;
 
+export const runtimeNameSchema = z.enum(["codex", "claude", "gemini", "terminal"]);
+export type RuntimeName = z.infer<typeof runtimeNameSchema>;
+
+export const runtimeAuthStateSchema = z.enum(["unknown", "authenticated", "unauthenticated", "not-installed"]);
+export type RuntimeAuthState = z.infer<typeof runtimeAuthStateSchema>;
+
+export const gatewayTypeSchema = z.enum(["web", "telegram", "whatsapp"]);
+export type GatewayType = z.infer<typeof gatewayTypeSchema>;
+
+export const gatewayStatusSchema = z.enum(["disabled", "configured", "linked", "active", "errored"]);
+export type GatewayStatus = z.infer<typeof gatewayStatusSchema>;
+
 export const cliCapabilitySchema = z.object({
   installed: z.boolean(),
   executablePath: z.string().optional(),
@@ -10,6 +22,7 @@ export const cliCapabilitySchema = z.object({
   launchable: z.boolean(),
   supportsRemoteWrapper: z.boolean(),
   supportsSessionControl: z.boolean(),
+  authState: runtimeAuthStateSchema.default("unknown"),
   detectionError: z.string().optional()
 });
 export type CliCapability = z.infer<typeof cliCapabilitySchema>;
@@ -102,6 +115,7 @@ export const sessionRecordSchema = z.object({
   agent: agentKindSchema.optional(),
   shell: z.string().optional(),
   terminalBackend: z.enum(["node-pty", "python-pty"]).optional(),
+  interactive: z.boolean().default(false),
   startedBy: startedBySchema,
   lastEventAt: z.number().optional(),
   lastViewedAt: z.number().optional(),
@@ -150,6 +164,110 @@ export const machineRecordSchema = z.object({
   updatedAt: z.number()
 });
 export type MachineRecord = z.infer<typeof machineRecordSchema>;
+
+export const ownerRecordSchema = z.object({
+  ownerId: z.string(),
+  displayLabel: z.string(),
+  defaultRuntime: runtimeNameSchema,
+  primaryGateway: gatewayTypeSchema,
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  migrationVersion: z.number().int().nonnegative().default(1),
+  migrationNotes: z.array(z.string()).default([])
+});
+export type OwnerRecord = z.infer<typeof ownerRecordSchema>;
+
+export const machineSetupRecordSchema = z.object({
+  machineId: z.string(),
+  hostname: z.string(),
+  ownerId: z.string(),
+  createdAt: z.number(),
+  updatedAt: z.number(),
+  migrationSource: z.string().optional()
+});
+export type MachineSetupRecord = z.infer<typeof machineSetupRecordSchema>;
+
+export const runtimeStatusRecordSchema = z.object({
+  runtime: runtimeNameSchema,
+  installed: z.boolean(),
+  launchable: z.boolean(),
+  authState: runtimeAuthStateSchema,
+  selected: z.boolean().default(false),
+  health: z.enum(["unknown", "healthy", "degraded", "broken"]).default("unknown"),
+  executablePath: z.string().optional(),
+  version: z.string().optional(),
+  supportsRemoteWrapper: z.boolean().optional(),
+  supportsSessionControl: z.boolean().optional(),
+  lastValidatedAt: z.number(),
+  notes: z.array(z.string()).default([])
+});
+export type RuntimeStatusRecord = z.infer<typeof runtimeStatusRecordSchema>;
+
+export const runtimesStateSchema = z.object({
+  ownerId: z.string(),
+  defaultRuntime: runtimeNameSchema,
+  runtimes: z.object({
+    codex: runtimeStatusRecordSchema,
+    claude: runtimeStatusRecordSchema,
+    gemini: runtimeStatusRecordSchema,
+    terminal: runtimeStatusRecordSchema
+  })
+});
+export type RuntimesState = z.infer<typeof runtimesStateSchema>;
+
+export const gatewayIdentityRecordSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  linkedAt: z.number(),
+  metadata: z.record(z.string(), z.unknown()).default({})
+});
+export type GatewayIdentityRecord = z.infer<typeof gatewayIdentityRecordSchema>;
+
+export const gatewayRecordSchema = z.object({
+  type: gatewayTypeSchema,
+  enabled: z.boolean(),
+  status: gatewayStatusSchema,
+  isPrimary: z.boolean().default(false),
+  linkedIdentities: z.array(gatewayIdentityRecordSchema).default([]),
+  configPath: z.string().optional(),
+  helperCommand: z.string().optional(),
+  lastError: z.string().optional(),
+  lastValidatedAt: z.number().optional(),
+  metadata: z.record(z.string(), z.unknown()).default({})
+});
+export type GatewayRecord = z.infer<typeof gatewayRecordSchema>;
+
+export const gatewaysStateSchema = z.object({
+  ownerId: z.string(),
+  primaryGateway: gatewayTypeSchema,
+  gateways: z.object({
+    web: gatewayRecordSchema,
+    telegram: gatewayRecordSchema,
+    whatsapp: gatewayRecordSchema
+  })
+});
+export type GatewaysState = z.infer<typeof gatewaysStateSchema>;
+
+export const doctorCheckSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  status: z.enum(["pass", "warn", "fail", "info"]),
+  summary: z.string(),
+  fix: z.string().optional(),
+  details: z.record(z.string(), z.unknown()).optional()
+});
+export type DoctorCheck = z.infer<typeof doctorCheckSchema>;
+
+export const doctorReportSchema = z.object({
+  ok: z.boolean(),
+  owner: ownerRecordSchema.nullable(),
+  machine: machineSetupRecordSchema.nullable(),
+  runtimes: runtimesStateSchema.nullable(),
+  gateways: gatewaysStateSchema.nullable(),
+  checks: z.array(doctorCheckSchema),
+  generatedAt: z.number()
+});
+export type DoctorReport = z.infer<typeof doctorReportSchema>;
 
 export const terminalChunkSchema = z.object({
   sessionId: z.string(),
@@ -245,6 +363,34 @@ export const daemonEventSchema = z.discriminatedUnion("type", [
   })
 ]);
 export type DaemonEvent = z.infer<typeof daemonEventSchema>;
+
+export const inboundGatewayCommandSchema = z.object({
+  id: z.string(),
+  gateway: gatewayTypeSchema,
+  ownerId: z.string(),
+  machineId: z.string(),
+  workspace: z.string().optional(),
+  sessionId: z.string().optional(),
+  runtime: runtimeNameSchema.optional(),
+  command: z.enum(["launch-session", "send-input", "stop-session", "select-workspace", "approve", "deny", "pair-web"]),
+  input: z.string().optional(),
+  createdAt: z.number(),
+  metadata: z.record(z.string(), z.unknown()).default({})
+});
+export type InboundGatewayCommand = z.infer<typeof inboundGatewayCommandSchema>;
+
+export const outboundGatewayEventSchema = z.object({
+  id: z.string(),
+  gateway: gatewayTypeSchema,
+  targetIdentityId: z.string(),
+  ownerId: z.string(),
+  machineId: z.string().optional(),
+  sessionId: z.string().optional(),
+  kind: z.enum(["session-ready", "session-blocked", "session-output", "approval-needed", "machine-offline", "gateway-link"]),
+  payload: z.record(z.string(), z.unknown()),
+  createdAt: z.number()
+});
+export type OutboundGatewayEvent = z.infer<typeof outboundGatewayEventSchema>;
 
 export const subscriberCommandSchema = z.discriminatedUnion("type", [
   z.object({

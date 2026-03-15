@@ -1,406 +1,136 @@
 #!/usr/bin/env node
 import { BridgeSdk } from "@bridge/sdk";
-import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
-import { homedir } from "node:os";
-import { randomInt } from "node:crypto";
-import { createInterface } from "node:readline/promises";
+import type { GatewayType, RuntimeName } from "@bridge/protocol";
 import { Command } from "commander";
-import localtunnel from "localtunnel";
-import qrcode from "qrcode-terminal";
 import { clearAuthToken, readAuthToken, writeAuthToken } from "./auth.js";
+import { buildDoctorReport, printDoctorReport } from "./doctor.js";
+import {
+  isSetupComplete,
+  localStatePaths,
+  readGatewaysState,
+  readOwnerRecord,
+  upsertGatewayRecord,
+  writeGatewaysState
+} from "./local-state.js";
+import { prompt, selectOne } from "./prompts.js";
+import { authenticateRuntime, resetOwnerAuth } from "./runtime-auth.js";
+import { runSetup } from "./setup.js";
+import {
+  appUrl,
+  baseUrl,
+  ensureLocalServices,
+  mintFreshToken,
+  printPairing
+} from "./services.js";
+import {
+  printTelegramLoginCode,
+  revokeTelegramIdentity,
+  setupTelegramGateway,
+  startTelegramBot
+} from "./telegram.js";
+import { scaffoldWhatsAppGateway } from "./whatsapp.js";
 
-const baseUrl = process.env.BRIDGE_SERVER_URL ?? "http://127.0.0.1:8787";
-const appUrl = process.env.BRIDGE_APP_URL ?? "https://bridge-cli.vercel.app";
-const auth = readAuthToken();
-const sdk = new BridgeSdk(baseUrl, auth?.token);
 const program = new Command();
-const currentFile = fileURLToPath(import.meta.url);
-const bridgeRoot = resolve(dirname(currentFile), "..", "..", "..");
-const telegramConfigPath = resolve(homedir(), ".bridge", "telegram.json");
+program.name("bridge").description("Owner-first remote coding control plane");
 
-program.name("bridge").description("Remote scripting and session-control CLI");
-
-type ManagedService = {
-  name: "server" | "daemon";
-  healthUrl: string;
-  child?: ChildProcess;
-  started: boolean;
-};
-
-type PairingStatus = {
-  code: string;
-  label?: string;
-  expiresAt: number;
-  consumedAt?: number;
-  tokenLabel?: string;
-};
-
-type TelegramConfig = {
-  botToken: string;
-  botUsername?: string;
-  serverUrl: string;
-  bridgeToken: string;
-  appUrl: string;
-  allowedChatIds: number[];
-  pollOffset?: number;
-  defaultMachineId?: string;
-  currentMachineByChat: Record<string, string>;
-  currentWorkspaceByChat: Record<string, string>;
-  currentSessionByChat: Record<string, string>;
-  loginCodes: Array<{
-    code: string;
-    createdAt: number;
-    expiresAt: number;
-    label?: string;
-    usedAt?: number;
-  }>;
-  updatedAt: number;
-};
-
-function logServiceOutput(name: string, child: ChildProcess): void {
-  child.stdout?.on("data", (chunk) => {
-    process.stdout.write(`[${name}] ${chunk.toString()}`);
-  });
-  child.stderr?.on("data", (chunk) => {
-    process.stderr.write(`[${name}] ${chunk.toString()}`);
-  });
+function currentSdk(): BridgeSdk {
+  const auth = readAuthToken();
+  return new BridgeSdk(baseUrl, auth?.token);
 }
 
-async function isHealthy(url: string): Promise<boolean> {
-  try {
-    const response = await fetch(url);
-    return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function waitForHealthy(url: string, timeoutMs = 15_000): Promise<void> {
-  const startedAt = Date.now();
-  while (!(await isHealthy(url))) {
-    if (Date.now() - startedAt > timeoutMs) {
-      throw new Error(`Timed out waiting for ${url}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-}
-
-function spawnWorkspaceCommand(name: "server" | "daemon" | "telegram"): ChildProcess {
-  const scriptPath =
-    name === "server"
-      ? resolve(bridgeRoot, "packages", "server", "dist", "server", "src", "index.js")
-      : name === "daemon"
-        ? resolve(bridgeRoot, "packages", "daemon-cli", "dist", "daemon-cli", "src", "index.js")
-        : resolve(bridgeRoot, "packages", "telegram-bot", "dist", "telegram-bot", "src", "index.js");
-
-  if (existsSync(scriptPath)) {
-    const child = spawn(process.execPath, [scriptPath], {
-      cwd: bridgeRoot,
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"]
-    });
-    logServiceOutput(name, child);
-    return child;
+async function runPrimaryFlow(): Promise<void> {
+  const owner = readOwnerRecord();
+  const gateways = readGatewaysState();
+  if (!owner || !gateways) {
+    await runSetup();
+    return;
   }
 
-  const filter = name === "server" ? "@bridge/server" : name === "daemon" ? "@bridge/daemon" : "@bridge/telegram-bot";
-  const child = spawn("corepack", ["pnpm", "--filter", filter, "dev"], {
-    cwd: bridgeRoot,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-  logServiceOutput(name, child);
-  return child;
-}
+  await ensureLocalServices({ startServer: true, startDaemon: true });
 
-async function ensureLocalServices(options?: {
-  startServer?: boolean;
-  startDaemon?: boolean;
-}): Promise<ManagedService[]> {
-  const services: ManagedService[] = [
-    {
-      name: "server",
-      healthUrl: `${baseUrl}/health`,
-      started: false
-    },
-    {
-      name: "daemon",
-      healthUrl: "http://127.0.0.1:8790/machine/capabilities",
-      started: false
-    }
-  ];
-
-  for (const service of services) {
-    const shouldStart = service.name === "server" ? options?.startServer !== false : options?.startDaemon !== false;
-    if (await isHealthy(service.healthUrl)) {
-      continue;
-    }
-    if (!shouldStart) {
-      continue;
-    }
-    service.child = spawnWorkspaceCommand(service.name);
-    service.started = true;
-    await waitForHealthy(service.healthUrl);
-  }
-
-  return services;
-}
-
-function isLoopbackUrl(url: string): boolean {
-  const hostname = new URL(url).hostname;
-  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "0.0.0.0";
-}
-
-async function createTunnel(serverUrl: string, subdomain?: string): Promise<{
-  url: string;
-  close: () => void;
-}> {
-  if (existsSync("/opt/homebrew/bin/cloudflared") || existsSync("/usr/local/bin/cloudflared")) {
-    return createCloudflareTunnel(serverUrl);
-  }
-
-  const parsed = new URL(serverUrl);
-  const port = Number(parsed.port || (parsed.protocol === "https:" ? 443 : 80));
-  const tunnel = await localtunnel({
-    port,
-    subdomain
-  });
-
-  return {
-    url: tunnel.url,
-    close: () => tunnel.close()
-  };
-}
-
-async function createCloudflareTunnel(serverUrl: string): Promise<{
-  url: string;
-  close: () => void;
-}> {
-  const executable = existsSync("/opt/homebrew/bin/cloudflared") ? "/opt/homebrew/bin/cloudflared" : "cloudflared";
-  const child = spawn(executable, ["tunnel", "--url", serverUrl, "--no-autoupdate"], {
-    cwd: bridgeRoot,
-    env: process.env,
-    stdio: ["ignore", "pipe", "pipe"]
-  });
-
-  const url = await new Promise<string>((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      child.kill("SIGTERM");
-      reject(new Error("Timed out waiting for cloudflared tunnel URL"));
-    }, 15_000);
-
-    const onChunk = (chunk: Buffer) => {
-      const text = chunk.toString();
-      const match = text.match(/https:\/\/[-a-z0-9]+\.trycloudflare\.com/i);
-      if (match) {
-        clearTimeout(timeout);
-        resolve(match[0]);
-      }
-    };
-
-    child.stdout?.on("data", onChunk);
-    child.stderr?.on("data", onChunk);
-    child.on("exit", (code) => {
-      clearTimeout(timeout);
-      reject(new Error(`cloudflared exited before a tunnel URL was ready (code ${code ?? "unknown"})`));
-    });
-    child.on("error", (error) => {
-      clearTimeout(timeout);
-      reject(error);
-    });
-  });
-
-  return {
-    url,
-    close: () => child.kill("SIGTERM")
-  };
-}
-
-async function resolvePublicServerUrl(options?: { useTunnel?: boolean; serverUrl?: string; subdomain?: string }): Promise<{
-  serverUrl: string;
-  close?: () => void;
-}> {
-  if (options?.serverUrl) {
-    return { serverUrl: options.serverUrl };
-  }
-  if (process.env.BRIDGE_PUBLIC_SERVER_URL) {
-    return { serverUrl: process.env.BRIDGE_PUBLIC_SERVER_URL };
-  }
-  if (!isLoopbackUrl(baseUrl) || options?.useTunnel === false) {
-    return { serverUrl: baseUrl };
-  }
-
-  const tunnel = await createTunnel(baseUrl, options?.subdomain ?? process.env.BRIDGE_TUNNEL_SUBDOMAIN);
-  return {
-    serverUrl: tunnel.url,
-    close: tunnel.close
-  };
-}
-
-async function printPairing(label: string, options?: { useTunnel?: boolean; serverUrl?: string; subdomain?: string }): Promise<void> {
-  const exposure = await resolvePublicServerUrl(options);
-  const pairingServerUrl =
-    options?.serverUrl || process.env.BRIDGE_PUBLIC_SERVER_URL || !isLoopbackUrl(baseUrl) ? exposure.serverUrl : baseUrl;
-  const sdk = new BridgeSdk(pairingServerUrl);
-  let lastConnectedCode: string | null = null;
-  let pollTimer: NodeJS.Timeout | null = null;
-
-  const startPairingPoll = (code: string) => {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-    }
-    pollTimer = setInterval(async () => {
-      try {
-        const response = await fetch(`${baseUrl}/auth/pairings/${code}`);
-        if (!response.ok) {
-          return;
-        }
-        const status = (await response.json()) as PairingStatus;
-        if (status.consumedAt && lastConnectedCode !== code) {
-          lastConnectedCode = code;
-          console.log(`Connected: ${status.tokenLabel ?? "a browser"} paired successfully. The app is alive, not just decorative.\n`);
-        }
-      } catch {
-        // If polling fails briefly, the QR should not have a full emotional breakdown.
-      }
-    }, 1200);
-  };
-
-  const renderPairing = async () => {
-    const pairing = await sdk.createPairing(label);
-    const url = new URL(appUrl);
-    url.searchParams.set("pairCode", pairing.code);
-    url.searchParams.set("serverUrl", exposure.serverUrl);
-    lastConnectedCode = null;
-    console.clear();
-    qrcode.generate(url.toString(), { small: true });
-    console.log(`\nCode: ${pairing.code}`);
-    console.log(`Server: ${exposure.serverUrl}`);
-    console.log(`Open: ${url.toString()}\n`);
-    if (process.stdin.isTTY) {
-      console.log("Press r to refresh the QR/code, or Ctrl+C to quit.\n");
-    }
-    startPairingPoll(pairing.code);
-  };
-
-  await renderPairing();
-
-  if (exposure.close) {
-    console.log("Tunnel is active. Keep this process running while you use the web app.");
-    const cleanup = () => {
-      if (pollTimer) {
-        clearInterval(pollTimer);
-        pollTimer = null;
-      }
-      if (process.stdin.isTTY) {
-        process.stdin.setRawMode(false);
-      }
-      process.stdin.pause();
-      exposure.close?.();
-      process.exit(0);
-    };
-    if (process.stdin.isTTY) {
-      process.stdin.setRawMode(true);
-      process.stdin.resume();
-      process.stdin.on("data", async (chunk) => {
-        const key = chunk.toString().toLowerCase();
-        if (key === "r") {
-          await renderPairing();
-          return;
-        }
-        if (key === "\u0003" || key === "q") {
-          cleanup();
-        }
-      });
-    }
-    process.on("SIGINT", cleanup);
-    process.on("SIGTERM", cleanup);
+  if (gateways.primaryGateway === "telegram" && gateways.gateways.telegram.enabled) {
+    console.log("Starting Bridge with Telegram as the primary gateway.");
+    startTelegramBot();
+    console.log("Telegram bot launched. Use `bridge gateway login-code telegram` to link a chat if needed.");
     await new Promise(() => undefined);
-  }
-}
-
-async function hostMode(options?: {
-  label?: string;
-  useTunnel?: boolean;
-  serverUrl?: string;
-  subdomain?: string;
-  startServer?: boolean;
-  startDaemon?: boolean;
-}): Promise<void> {
-  const services = await ensureLocalServices({
-    startServer: options?.startServer,
-    startDaemon: options?.startDaemon
-  });
-
-  const started = services.filter((service) => service.started).map((service) => service.name);
-  if (started.length > 0) {
-    console.log(`Started: ${started.join(", ")}`);
-  } else {
-    console.log("Local server and daemon were already running.");
+    return;
   }
 
-  await printPairing(options?.label ?? "bridge", {
-    useTunnel: options?.useTunnel,
-    serverUrl: options?.serverUrl,
-    subdomain: options?.subdomain
-  });
-}
-
-function createFreshLinkCode(): string {
-  return String(randomInt(100000, 1_000_000));
-}
-
-function readTelegramConfig(): TelegramConfig | null {
-  if (!existsSync(telegramConfigPath)) {
-    return null;
+  if (gateways.primaryGateway === "whatsapp") {
+    console.log("WhatsApp is configured as the primary gateway, but the helper is still scaffold-level. Falling back to the web gateway for now.");
   }
-  return JSON.parse(readFileSync(telegramConfigPath, "utf8")) as TelegramConfig;
+
+  await printPairing("bridge", { useTunnel: true });
 }
 
-function writeTelegramConfig(config: TelegramConfig): TelegramConfig {
-  mkdirSync(dirname(telegramConfigPath), { recursive: true });
-  const next = {
-    ...config,
-    updatedAt: Date.now()
-  };
-  writeFileSync(telegramConfigPath, JSON.stringify(next, null, 2));
-  return next;
-}
+async function launcherMenu(): Promise<void> {
+  const owner = readOwnerRecord();
+  console.log("\nBridge\n");
+  console.log(owner ? `Owner: ${owner.displayLabel}` : "Owner: not configured");
+  console.log("1. Run primary flow");
+  console.log("2. Setup / migrate this laptop");
+  console.log("3. Authenticate a runtime");
+  console.log("4. Gateway actions");
+  console.log("5. Doctor");
+  console.log("6. Quit\n");
 
-function issueTelegramLoginCode(config: TelegramConfig, options?: { minutes?: number; label?: string }): {
-  config: TelegramConfig;
-  code: string;
-  expiresAt: number;
-} {
-  const code = createFreshLinkCode();
-  const createdAt = Date.now();
-  const expiresAt = createdAt + (options?.minutes ?? 10) * 60_000;
-  const next = writeTelegramConfig({
-    ...config,
-    loginCodes: [
-      ...(config.loginCodes ?? []).filter((entry) => !entry.usedAt && entry.expiresAt > createdAt),
-      {
-        code,
-        createdAt,
-        expiresAt,
-        label: options?.label
-      }
-    ]
-  });
-  return {
-    config: next,
-    code,
-    expiresAt
-  };
-}
-
-async function mintFreshToken(label: string, serverUrl = baseUrl): Promise<{ token: string; label: string; createdAt: number; lastUsedAt: number }> {
-  const publicSdk = new BridgeSdk(serverUrl);
-  const pairing = await publicSdk.createPairing(label);
-  return publicSdk.exchangePairing(pairing.code, label);
+  const choice = await prompt("Pick an option", "1");
+  if (choice === "1") {
+    await runPrimaryFlow();
+    return;
+  }
+  if (choice === "2") {
+    await runSetup();
+    return;
+  }
+  if (choice === "3") {
+    const runtime = await selectOne<RuntimeName>(
+      "Select a runtime to authenticate",
+      [
+        { value: "codex", label: "Codex" },
+        { value: "claude", label: "Claude Code" },
+        { value: "gemini", label: "Gemini CLI" },
+        { value: "terminal", label: "Terminal" }
+      ],
+      "codex"
+    );
+    await authenticateRuntime(runtime);
+    return;
+  }
+  if (choice === "4") {
+    const gatewayAction = await selectOne<"web" | "telegram" | "whatsapp" | "list">(
+      "Gateway actions",
+      [
+        { value: "web", label: "Enable/run web gateway" },
+        { value: "telegram", label: "Configure Telegram" },
+        { value: "whatsapp", label: "Scaffold WhatsApp" },
+        { value: "list", label: "List gateway state" }
+      ],
+      "list"
+    );
+    if (gatewayAction === "list") {
+      const gateways = readGatewaysState();
+      console.log(JSON.stringify(gateways, null, 2));
+      return;
+    }
+    if (gatewayAction === "web") {
+      await printPairing("bridge", { useTunnel: true });
+      return;
+    }
+    if (gatewayAction === "telegram") {
+      await setupTelegramGateway({ serverUrl: baseUrl, appUrl });
+      return;
+    }
+    scaffoldWhatsAppGateway();
+    return;
+  }
+  if (choice === "5") {
+    const report = await buildDoctorReport(false);
+    printDoctorReport(report, false);
+    process.exitCode = report.ok ? 0 : 1;
+    return;
+  }
+  console.log("Bridge launcher closed. Very mature. Very composed.");
 }
 
 async function reauthenticateCli(label = "bridge-cli"): Promise<void> {
@@ -408,221 +138,299 @@ async function reauthenticateCli(label = "bridge-cli"): Promise<void> {
   clearAuthToken();
   const token = await mintFreshToken(label, baseUrl);
   writeAuthToken(token);
-  console.log(`Re-authenticated as ${token.label}. The CLI now has fresh credentials and fewer excuses.\n`);
-  console.log(JSON.stringify(token, null, 2));
+  console.log(`Re-authenticated as ${token.label}. The CLI now has fresh credentials and fewer excuses.`);
 }
 
-async function prompt(question: string, fallback = ""): Promise<string> {
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout
-  });
-  try {
-    const suffix = fallback ? ` (${fallback})` : "";
-    const answer = await rl.question(`${question}${suffix}: `);
-    return answer.trim() || fallback;
-  } finally {
-    rl.close();
+async function addGateway(type: GatewayType, options?: { botToken?: string; yes?: boolean }): Promise<void> {
+  const owner = readOwnerRecord();
+  const gateways = readGatewaysState();
+  if (!owner || !gateways) {
+    console.log("Bridge is not set up yet. Running `bridge setup` first.");
+    await runSetup();
   }
+
+  const refreshedGateways = readGatewaysState();
+  if (!refreshedGateways) {
+    throw new Error("Gateway state is still missing after setup.");
+  }
+
+  if (type === "web") {
+    const webGateway = refreshedGateways.gateways.web;
+    writeGatewaysState(
+      upsertGatewayRecord(refreshedGateways, {
+        ...webGateway,
+        type: "web",
+        enabled: true,
+        status: webGateway.linkedIdentities.length > 0 ? "linked" : "configured",
+        isPrimary: refreshedGateways.primaryGateway === "web",
+        configPath: localStatePaths.home,
+        metadata: webGateway.metadata ?? {},
+        lastValidatedAt: Date.now()
+      })
+    );
+    console.log("Web gateway is enabled.");
+    return;
+  }
+
+  if (type === "telegram") {
+    await ensureLocalServices({ startServer: true, startDaemon: true });
+    await setupTelegramGateway({
+      serverUrl: baseUrl,
+      appUrl,
+      botToken: options?.botToken,
+      autoConfirm: options?.yes
+    });
+    return;
+  }
+
+  scaffoldWhatsAppGateway();
 }
 
-async function fetchTelegramMe(botToken: string): Promise<{ username?: string; first_name?: string }> {
-  const response = await fetch(`https://api.telegram.org/bot${botToken}/getMe`, {
-    method: "POST"
-  });
-  const payload = (await response.json()) as { ok: boolean; result?: { username?: string; first_name?: string }; description?: string };
-  if (!payload.ok || !payload.result) {
-    throw new Error(payload.description ?? "Telegram rejected the bot token");
+function listGateways(): void {
+  const state = readGatewaysState();
+  if (!state) {
+    console.log("No gateway state found yet. Run `bridge setup`.");
+    return;
   }
-  return payload.result;
-}
-
-async function setupTelegramBot(options?: {
-  startAfterSetup?: boolean;
-  botToken?: string;
-  serverUrl?: string;
-  appUrl?: string;
-  autoConfirm?: boolean;
-}): Promise<void> {
-  await ensureLocalServices({ startServer: true, startDaemon: true });
-  const botToken = options?.botToken ?? (options?.autoConfirm ? "" : await prompt("Telegram bot token"));
-  if (!botToken) {
-    throw new Error("Telegram bot token is required");
-  }
-
-  const me = await fetchTelegramMe(botToken);
-  const serverUrl = options?.serverUrl ?? (options?.autoConfirm ? baseUrl : await prompt("Bridge server URL for the bot", baseUrl));
-  const appForBot = options?.appUrl ?? (options?.autoConfirm ? appUrl : await prompt("Bridge web app URL", appUrl));
-  const existingConfig = existsSync(telegramConfigPath);
-  const bridgeToken = (await mintFreshToken("bridge-telegram-bot", serverUrl)).token;
-  const config = writeTelegramConfig({
-    botToken,
-    botUsername: me.username,
-    serverUrl,
-    bridgeToken,
-    appUrl: appForBot,
-    allowedChatIds: [],
-    pollOffset: undefined,
-    defaultMachineId: undefined,
-    currentMachineByChat: {},
-    currentWorkspaceByChat: {},
-    currentSessionByChat: {},
-    loginCodes: [],
-    updatedAt: Date.now()
-  });
-  const login = issueTelegramLoginCode(config, { minutes: 15, label: "initial setup" });
-
-  console.log(`Telegram bot ${me.username ? `@${me.username}` : "(username not reported)"} is configured.`);
-  if (me.username) {
-    console.log(`Open: https://t.me/${me.username}?start=${login.code}`);
-  }
-  console.log(`Or message the bot with: /start ${login.code}`);
-  console.log(`That login code expires in 15 minutes and works once, because permanent shared secrets are just future incidents wearing shoes.`);
-  console.log(existingConfig ? "Previous Telegram config was replaced. The old one died so the new one could be dramatic." : "Telegram setup saved.");
-
-  if (options?.startAfterSetup) {
-    await startTelegramBot();
+  for (const gateway of Object.values(state.gateways)) {
+    console.log(`${gateway.type}: ${gateway.status}${gateway.isPrimary ? " (primary)" : ""}${gateway.linkedIdentities.length ? ` - ${gateway.linkedIdentities.length} linked` : ""}`);
   }
 }
 
-function printTelegramLoginCode(minutes = 15, label?: string): void {
-  const config = readTelegramConfig();
-  if (!config) {
-    throw new Error("Telegram is not configured yet. Run `bridge telegram setup` first.");
+function revokeGateway(target: string): void {
+  const gateways = readGatewaysState();
+  if (!gateways) {
+    throw new Error("Gateway state not found. Run `bridge setup` first.");
   }
-  const issued = issueTelegramLoginCode(config, { minutes, label });
-  const expiresAt = new Date(issued.expiresAt).toLocaleString("en-IN", { timeZone: "Asia/Kolkata" });
-  console.log(`Telegram login code: ${issued.code}`);
-  console.log(`Expires: ${expiresAt}`);
-  if (issued.config.botUsername) {
-    console.log(`Deep link: https://t.me/${issued.config.botUsername}?start=${issued.code}`);
+
+  if (target === "telegram") {
+    const telegramGateway = gateways.gateways.telegram;
+    revokeTelegramIdentity();
+    writeGatewaysState(
+      upsertGatewayRecord(gateways, {
+        ...telegramGateway,
+        type: "telegram",
+        enabled: false,
+        status: "disabled",
+        isPrimary: gateways.primaryGateway === "telegram",
+        linkedIdentities: [],
+        metadata: telegramGateway.metadata ?? {},
+        lastValidatedAt: Date.now()
+      })
+    );
+    console.log("Telegram gateway disabled.");
+    return;
   }
-}
 
-async function startTelegramBot(): Promise<void> {
-  if (!existsSync(telegramConfigPath)) {
-    throw new Error(`Telegram is not configured yet. Run \`bridge telegram setup\` first.`);
+  if (target === "web" || target === "whatsapp") {
+    const currentGateway = gateways.gateways[target];
+    writeGatewaysState(
+      upsertGatewayRecord(gateways, {
+        ...currentGateway,
+        type: target,
+        enabled: false,
+        status: "disabled",
+        isPrimary: gateways.primaryGateway === target,
+        linkedIdentities: [],
+        metadata: currentGateway.metadata ?? {},
+        lastValidatedAt: Date.now()
+      })
+    );
+    console.log(`${target} gateway disabled.`);
+    return;
   }
-  const child = spawnWorkspaceCommand("telegram");
-  child.on("exit", (code) => {
-    process.exitCode = code ?? 0;
-  });
-  await new Promise(() => undefined);
-}
 
-async function launcherMenu(): Promise<void> {
-  console.log("\nBridge launcher\n");
-  console.log("1. Pair phone/web and host locally");
-  console.log("2. Set up Telegram bot");
-  console.log("3. Start Telegram bot");
-  console.log("4. Re-authenticate this CLI");
-  console.log("5. Doctor / diagnostics");
-  console.log("6. Quit\n");
-
-  const choice = await prompt("Pick an option", "1");
-  switch (choice) {
-    case "1":
-      await hostMode({ label: "bridge", useTunnel: true });
-      return;
-    case "2":
-      await setupTelegramBot();
-      return;
-    case "3":
-      await startTelegramBot();
-      return;
-    case "4":
-      await reauthenticateCli();
-      return;
-    case "5":
-      console.log(
-        JSON.stringify(
-          {
-            checks: await Promise.all([
-              fetch(`${baseUrl}/health`)
-                .then((response) => ({ name: "server", ok: response.ok, url: baseUrl }))
-                .catch(() => ({ name: "server", ok: false, url: baseUrl })),
-              fetch("http://127.0.0.1:8790/machine/capabilities")
-                .then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" }))
-                .catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
-            ]),
-            hostedApp: appUrl,
-            telegramConfigured: existsSync(telegramConfigPath)
-          },
-          null,
-          2
-        )
+  if (revokeTelegramIdentity(target)) {
+    const updated = readGatewaysState();
+    if (updated) {
+      const telegramGateway = updated.gateways.telegram;
+      writeGatewaysState(
+        upsertGatewayRecord(updated, {
+          ...telegramGateway,
+          type: "telegram",
+          linkedIdentities: telegramGateway.linkedIdentities.filter((identity) => identity.id !== target),
+          status: telegramGateway.linkedIdentities.length > 1 ? "linked" : "configured",
+          isPrimary: updated.primaryGateway === "telegram",
+          metadata: telegramGateway.metadata ?? {},
+          lastValidatedAt: Date.now()
+        })
       );
-      return;
-    default:
-      console.log("Bridge launcher closed. No QRs were harmed in the making of this decision.");
+    }
+    console.log(`Revoked Telegram identity ${target}.`);
+    return;
+  }
+
+  throw new Error(`No gateway or linked identity matched "${target}"`);
+}
+
+async function handleGatewayLoginCode(type: GatewayType, minutes: number, label?: string): Promise<void> {
+  if (type === "telegram") {
+    printTelegramLoginCode(minutes, label);
+    return;
+  }
+  if (type === "web") {
+    await printPairing(label ?? "bridge", { useTunnel: true });
+    return;
+  }
+  throw new Error("WhatsApp login codes are not implemented yet. The scaffold exists; the magic does not.");
+}
+
+function requireSetup(): void {
+  if (!isSetupComplete()) {
+    throw new Error("Bridge is not set up yet. Run `bridge setup` first.");
   }
 }
 
-const authCommand = program.command("auth").description("Pairing code auth");
+async function runSessionInput(sessionId: string, text: string): Promise<void> {
+  const sdk = currentSdk();
+  const socket = sdk.subscribe(sessionId, {});
+  await new Promise<void>((resolve) => {
+    socket.on("open", () => {
+      socket.send(JSON.stringify({ type: "input", sessionId, data: `${text}\n` }));
+      setTimeout(() => socket.close(), 80);
+    });
+    socket.on("close", () => resolve());
+  });
+}
 
-authCommand
-  .command("pair")
-  .option("--label <label>", "Label for the requesting device", "bridge")
-  .option("--no-tunnel", "Do not create a public tunnel for local servers")
-  .option("--server-url <url>", "Explicit public server URL")
-  .option("--subdomain <name>", "Preferred localtunnel subdomain")
+program
+  .command("setup")
+  .description("Create or migrate owner + machine + runtime + gateway state")
+  .option("--owner <label>", "Owner label")
+  .option("--runtime <runtime>", "Default runtime")
+  .option("--gateway <gateway>", "Primary gateway")
   .action(async (options) => {
-    await printPairing(options.label, {
-      useTunnel: options.tunnel,
-      serverUrl: options.serverUrl,
-      subdomain: options.subdomain
+    await runSetup({
+      ownerLabel: options.owner,
+      defaultRuntime: options.runtime,
+      primaryGateway: options.gateway
     });
   });
 
-authCommand
-  .command("login")
-  .requiredOption("--code <code>", "6 digit pairing code")
-  .option("--label <label>", "Label for this device", "bridge-cli")
-  .action(async (options) => {
-    const publicSdk = new BridgeSdk(baseUrl);
-    const token = await publicSdk.exchangePairing(options.code, options.label);
-    writeAuthToken(token);
-    console.log(JSON.stringify(token, null, 2));
+const auth = program.command("auth").description("Owner and runtime authentication");
+const authRuntime = auth.command("runtime").description("Authenticate runtime CLIs");
+authRuntime
+  .argument("[runtime]", "codex | claude | gemini | terminal")
+  .action(async (runtime: RuntimeName | undefined) => {
+    const selected =
+      runtime ??
+      (await selectOne<RuntimeName>(
+        "Authenticate which runtime?",
+        [
+          { value: "codex", label: "Codex" },
+          { value: "claude", label: "Claude Code" },
+          { value: "gemini", label: "Gemini CLI" },
+          { value: "terminal", label: "Terminal" }
+        ],
+        "codex"
+      ));
+    await authenticateRuntime(selected);
   });
 
-authCommand.command("logout").action(() => {
-  clearAuthToken();
-  console.log(JSON.stringify({ ok: true }, null, 2));
-});
+auth
+  .command("owner")
+  .description("Owner auth utilities")
+  .argument("<action>", "reset")
+  .action((action: string) => {
+    if (action !== "reset") {
+      throw new Error("Only `bridge auth owner reset` is supported for now.");
+    }
+    resetOwnerAuth();
+  });
+
+const gateway = program.command("gateway").description("Manage owner-scoped gateways");
+gateway
+  .command("add")
+  .argument("<type>", "web | telegram | whatsapp")
+  .option("--bot-token <token>", "Telegram bot token")
+  .option("--yes", "Skip setup prompts where possible")
+  .action(async (type: GatewayType, options) => {
+    await addGateway(type, options);
+  });
+
+gateway
+  .command("list")
+  .action(() => {
+    listGateways();
+  });
+
+gateway
+  .command("revoke")
+  .argument("<target>", "gateway name or linked identity")
+  .action((target) => {
+    revokeGateway(target);
+  });
+
+gateway
+  .command("login-code")
+  .argument("<type>", "web | telegram | whatsapp")
+  .option("--minutes <minutes>", "How long the code should stay valid", "15")
+  .option("--label <label>", "Optional note for the login code")
+  .action(async (type: GatewayType, options) => {
+    await handleGatewayLoginCode(type, Number(options.minutes), options.label);
+  });
+
+program
+  .command("doctor")
+  .description("Validate owner, machine, runtimes, gateways, and local services")
+  .option("--verbose", "Show more diagnostics")
+  .action(async (options) => {
+    const report = await buildDoctorReport(Boolean(options.verbose));
+    printDoctorReport(report, Boolean(options.verbose));
+    process.exitCode = report.ok ? 0 : 1;
+  });
+
+program
+  .command("run")
+  .description("Start local services and launch the primary gateway flow")
+  .action(async () => {
+    requireSetup();
+    await runPrimaryFlow();
+  });
+
+program
+  .command("reauth")
+  .description("Rotate the saved CLI auth token")
+  .option("--label <label>", "Label for the refreshed CLI token", "bridge-cli")
+  .action(async (options) => {
+    await reauthenticateCli(options.label);
+  });
+
+const telegram = program.command("telegram").description("Compatibility wrapper for Telegram gateway commands");
+telegram
+  .command("setup")
+  .option("--bot-token <token>", "Telegram bot token")
+  .option("--yes", "Skip setup prompts where possible")
+  .action(async (options) => {
+    await addGateway("telegram", { botToken: options.botToken, yes: options.yes });
+  });
+telegram
+  .command("start")
+  .action(() => {
+    startTelegramBot();
+  });
+telegram
+  .command("login-code")
+  .option("--minutes <minutes>", "How long the code should stay valid", "15")
+  .option("--label <label>", "Optional note for the login code")
+  .action(async (options) => {
+    await handleGatewayLoginCode("telegram", Number(options.minutes), options.label);
+  });
 
 program
   .command("connect")
-  .description("Generate a QR and 6-digit code for pairing a browser or phone")
-  .option("--label <label>", "Label for the requesting device", "bridge")
-  .option("--no-tunnel", "Do not create a public tunnel for local servers")
-  .option("--server-url <url>", "Explicit public server URL")
-  .option("--subdomain <name>", "Preferred localtunnel subdomain")
-  .action(async (options) => {
-    await printPairing(options.label, {
-      useTunnel: options.tunnel,
-      serverUrl: options.serverUrl,
-      subdomain: options.subdomain
-    });
+  .description("Compatibility shim for web pairing")
+  .action(async () => {
+    console.log("`bridge connect` is deprecated. Using the owner-first web gateway flow instead.\n");
+    await handleGatewayLoginCode("web", 15, "bridge");
   });
 
 program
   .command("host")
-  .description("Start the local Bridge server and daemon, then print a pairing QR")
-  .option("--label <label>", "Label for the requesting device", "bridge")
-  .option("--no-tunnel", "Do not create a public tunnel for local servers")
-  .option("--server-url <url>", "Explicit public server URL")
-  .option("--subdomain <name>", "Preferred localtunnel subdomain")
-  .option("--no-server", "Do not auto-start the local Bridge server")
-  .option("--no-daemon", "Do not auto-start the local Bridge daemon")
-  .action(async (options) => {
-    await hostMode({
-      label: options.label,
-      useTunnel: options.tunnel,
-      serverUrl: options.serverUrl,
-      subdomain: options.subdomain,
-      startServer: options.server,
-      startDaemon: options.daemon
-    });
+  .description("Compatibility shim for the new run flow")
+  .action(async () => {
+    console.log("`bridge host` is deprecated. Running `bridge run`.\n");
+    await runPrimaryFlow();
   });
 
 program
@@ -637,116 +445,32 @@ program
     console.log(JSON.stringify(token, null, 2));
   });
 
-program
-  .command("reauth")
-  .description("Rotate the saved CLI auth token")
-  .option("--label <label>", "Label for the refreshed CLI token", "bridge-cli")
-  .action(async (options) => {
-    await reauthenticateCli(options.label);
-  });
-
-program
-  .command("doctor")
-  .description("Check server and daemon reachability")
-  .action(async () => {
-    const checks = await Promise.all([
-      fetch(`${baseUrl}/health`)
-        .then((response) => ({ name: "server", ok: response.ok, url: baseUrl }))
-        .catch(() => ({ name: "server", ok: false, url: baseUrl })),
-      fetch("http://127.0.0.1:8790/machine/capabilities")
-        .then((response) => ({ name: "daemon", ok: response.ok, url: "http://127.0.0.1:8790" }))
-        .catch(() => ({ name: "daemon", ok: false, url: "http://127.0.0.1:8790" }))
-    ]);
-    console.log(
-      JSON.stringify(
-        {
-          checks,
-          hostedApp: appUrl,
-          publicServerUrl: process.env.BRIDGE_PUBLIC_SERVER_URL ?? null,
-          tunnelMode: process.env.BRIDGE_PUBLIC_SERVER_URL ? "disabled (explicit public server)" : isLoopbackUrl(baseUrl) ? "available on demand" : "not needed",
-          authLabel: auth?.label ?? null,
-          telegramConfigured: existsSync(telegramConfigPath)
-        },
-        null,
-        2
-      )
-    );
-  });
-
-const telegram = program.command("telegram").description("Telegram bot setup and runtime");
-
-telegram
-  .command("setup")
-  .description("Configure the Telegram bot and create a Bridge auth token for it")
-  .option("--bot-token <token>", "Telegram bot token")
-  .option("--server-url <url>", "Bridge server URL the bot should use", baseUrl)
-  .option("--app-url <url>", "Bridge web app URL the bot should send back", appUrl)
-  .option("--yes", "Skip prompts and use the provided/default values")
-  .option("--start", "Start the bot immediately after setup")
-  .action(async (options) => {
-    await setupTelegramBot({
-      startAfterSetup: options.start,
-      botToken: options.botToken,
-      serverUrl: options.serverUrl,
-      appUrl: options.appUrl,
-      autoConfirm: options.yes
-    });
-  });
-
-telegram
-  .command("start")
-  .description("Start the configured Telegram bot")
-  .action(async () => {
-    await startTelegramBot();
-  });
-
-telegram
-  .command("login-code")
-  .description("Generate a one-time Telegram login code")
-  .option("--minutes <minutes>", "How long the code should stay valid", "15")
-  .option("--label <label>", "Optional note for this code")
-  .action(async (options) => {
-    printTelegramLoginCode(Number(options.minutes), options.label);
-  });
-
-program
-  .command("machines")
-  .description("List machines")
-  .action(async () => {
-    console.log(JSON.stringify(await sdk.listMachines(), null, 2));
-  });
+program.command("machines").description("List machines").action(async () => {
+  console.log(JSON.stringify(await currentSdk().listMachines(), null, 2));
+});
 
 const machine = program.command("machine").description("Machine operations");
-
-machine
-  .command("capabilities")
-  .argument("<machineId>")
-  .action(async (machineId) => {
-    console.log(JSON.stringify((await sdk.getMachine(machineId)).capabilities, null, 2));
+machine.command("capabilities").argument("<machineId>").action(async (machineId) => {
+  console.log(JSON.stringify((await currentSdk().getMachine(machineId)).capabilities, null, 2));
+});
+machine.command("power").argument("<machineId>").argument("<mode>").action(async (machineId, mode) => {
+  const sdk = currentSdk();
+  const machineRecord = await sdk.getMachine(machineId);
+  const updated = await sdk.updatePowerPolicy(machineId, {
+    ...machineRecord.powerPolicy,
+    mode
   });
+  console.log(JSON.stringify(updated.powerPolicy, null, 2));
+});
 
-machine
-  .command("power")
-  .argument("<machineId>")
-  .argument("<mode>")
-  .action(async (machineId, mode) => {
-    const machineRecord = await sdk.getMachine(machineId);
-    const updated = await sdk.updatePowerPolicy(machineId, {
-      ...machineRecord.powerPolicy,
-      mode
-    });
-    console.log(JSON.stringify(updated.powerPolicy, null, 2));
-  });
-
-const session = program.command("session").description("Agent session operations");
-
+const session = program.command("session").description("Session operations");
 session
   .command("start")
   .requiredOption("--machine <machineId>")
   .requiredOption("--agent <agent>")
   .requiredOption("--cwd <cwd>")
   .action(async (options) => {
-    const created = await sdk.createSession(options.machine, {
+    const created = await currentSdk().createSession(options.machine, {
       runtime: "agent-session",
       agent: options.agent,
       cwd: options.cwd,
@@ -754,45 +478,21 @@ session
     });
     console.log(JSON.stringify(created, null, 2));
   });
-
-session
-  .command("attach")
-  .argument("<sessionId>")
-  .action(async (sessionId) => {
-    const socket = sdk.subscribe(sessionId, {
-      onSnapshot: (payload) => {
-        payload.events.forEach((event) => process.stdout.write(event.data));
-      },
-      onEvent: (event) => {
-        process.stdout.write(event.data);
-      },
-      onError: (message) => {
-        process.stderr.write(`${message}\n`);
-      }
-    });
-    process.on("SIGINT", () => socket.close());
-    await new Promise(() => undefined);
+session.command("attach").argument("<sessionId>").action(async (sessionId) => {
+  const socket = currentSdk().subscribe(sessionId, {
+    onSnapshot: (payload) => payload.events.forEach((event) => process.stdout.write(event.data)),
+    onEvent: (event) => process.stdout.write(event.data),
+    onError: (message) => process.stderr.write(`${message}\n`)
   });
-
-session
-  .command("send")
-  .argument("<sessionId>")
-  .argument("<text>")
-  .action(async (sessionId, text) => {
-    const socket = sdk.subscribe(sessionId, {});
-    socket.on("open", () => {
-      socket.send(JSON.stringify({ type: "input", sessionId, data: `${text}\n` }));
-      setTimeout(() => socket.close(), 50);
-    });
-    await new Promise((resolve) => socket.on("close", resolve));
-  });
-
-session
-  .command("stop")
-  .argument("<sessionId>")
-  .action(async (sessionId) => {
-    console.log(JSON.stringify(await sdk.stopSession(sessionId), null, 2));
-  });
+  process.on("SIGINT", () => socket.close());
+  await new Promise(() => undefined);
+});
+session.command("send").argument("<sessionId>").argument("<text>").action(async (sessionId, text) => {
+  await runSessionInput(sessionId, text);
+});
+session.command("stop").argument("<sessionId>").action(async (sessionId) => {
+  console.log(JSON.stringify(await currentSdk().stopSession(sessionId), null, 2));
+});
 
 program
   .command("terminal")
@@ -800,7 +500,7 @@ program
   .requiredOption("--machine <machineId>")
   .requiredOption("--cwd <cwd>")
   .action(async (options) => {
-    const created = await sdk.createSession(options.machine, {
+    const created = await currentSdk().createSession(options.machine, {
       runtime: "terminal-session",
       cwd: options.cwd,
       startedBy: "bridge"
@@ -808,31 +508,18 @@ program
     console.log(JSON.stringify(created, null, 2));
   });
 
-program
-  .command("terminal-attach")
-  .argument("<sessionId>")
-  .description("Attach to a terminal session stream")
-  .action(async (sessionId) => {
-    const socket = sdk.subscribe(sessionId, {
-      onSnapshot: (payload) => {
-        payload.events.forEach((event) => process.stdout.write(event.data));
-      },
-      onEvent: (event) => {
-        process.stdout.write(event.data);
-      },
-      onError: (message) => {
-        process.stderr.write(`${message}\n`);
-      }
-    });
-    process.on("SIGINT", () => socket.close());
-    await new Promise(() => undefined);
-  });
-
 if (process.argv.length <= 2) {
   if (process.stdin.isTTY && process.stdout.isTTY) {
-    await launcherMenu();
+    if (!isSetupComplete()) {
+      await runSetup();
+    } else {
+      await launcherMenu();
+    }
   } else {
-    await hostMode({ label: "bridge", useTunnel: true });
+    if (!isSetupComplete()) {
+      await runSetup({ nonInteractive: true });
+    }
+    await runPrimaryFlow();
   }
 } else {
   await program.parseAsync(process.argv);

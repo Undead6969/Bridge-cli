@@ -157,6 +157,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       return;
     }
     session.status = "waiting";
+    session.interactive = true;
     session.attention = "needs-review";
     session.updatedAt = Date.now();
     session.lastEventAt = session.updatedAt;
@@ -199,6 +200,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
       shell: spec.runtime === "terminal-session" ? spec.shell ?? process.env.SHELL ?? "/bin/sh" : undefined,
       terminalBackend: undefined,
       startedBy: spec.startedBy,
+      interactive: spec.runtime === "terminal-session",
       lastEventAt: now,
       lastViewedAt: spec.startedBy === "web" || spec.startedBy === "pwa" ? now : undefined,
       unreadCount: 0,
@@ -276,6 +278,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           return;
         }
         current.status = "stopped";
+        current.interactive = false;
         current.attention = "idle";
         current.updatedAt = Date.now();
         this.emit("session.event", createEvent(session.id, "status", "process exited", { code: exitCode, signal, backend: "node-pty" }));
@@ -319,6 +322,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         return;
       }
       current.status = "stopped";
+      current.interactive = false;
       current.attention = "idle";
       current.updatedAt = Date.now();
       this.emit("session.event", createEvent(session.id, "status", "process exited", { code, signal, backend: "python-pty" }));
@@ -349,6 +353,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
           return;
         }
         current.status = "stopped";
+        current.interactive = false;
         current.attention = "idle";
         current.updatedAt = Date.now();
         this.emit("session.event", createEvent(session.id, "status", `pty exited`, { code: exitCode, signal, backend: "node-pty" }));
@@ -401,6 +406,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
         return;
       }
       current.status = "stopped";
+      current.interactive = false;
       current.attention = "idle";
       current.updatedAt = Date.now();
       this.emit("session.event", createEvent(session.id, "status", `pty exited`, { code, signal, backend: "python-pty" }));
@@ -490,6 +496,17 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     if (!(session.status === "waiting" && summary.status === "running")) {
       session.status = summary.status ?? session.status;
     }
+    if (session.runtime === "agent-session") {
+      if (session.status === "running" || session.status === "starting") {
+        session.interactive = false;
+      }
+      if (session.status === "waiting" || summary.eventKind === "ready") {
+        session.interactive = true;
+      }
+      if (session.status === "blocked" || session.status === "completed" || session.status === "stopped") {
+        session.interactive = false;
+      }
+    }
     session.attention = summary.attention ?? session.attention;
     if (summary.eventKind) {
       this.emit("session.event", createEvent(sessionId, summary.eventKind, data));
@@ -547,6 +564,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.pendingApprovals.delete(requestId);
     this.input(sessionId, decision === "approve" ? "y\n" : "n\n");
     session.status = decision === "approve" ? "running" : "blocked";
+    session.interactive = false;
     session.attention = decision === "approve" ? "activity" : "urgent";
     this.emit(
       "session.event",
@@ -569,6 +587,7 @@ export class SessionManager extends EventEmitter<SessionManagerEvents> {
     session.pty?.kill();
     session.child?.kill("SIGTERM");
     session.status = "stopped";
+    session.interactive = false;
     session.attention = "idle";
     session.updatedAt = Date.now();
     session.lastEventAt = session.updatedAt;

@@ -65,6 +65,9 @@ importers:
 
   packages/bridge-cli:
     dependencies:
+      '@bridge/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       '@bridge/sdk':
         specifier: workspace:*
         version: link:../sdk

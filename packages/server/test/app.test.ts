@@ -170,6 +170,7 @@ describe("server app", () => {
         owner: "remote",
         cwd: "/tmp",
         startedBy: "web",
+        interactive: true,
         unreadCount: 0,
         createdAt: 1,
         updatedAt: 1

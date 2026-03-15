@@ -18,6 +18,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@bridge/protocol": "workspace:*",
     "@bridge/sdk": "workspace:*",
     "commander": "^14.0.1",
     "localtunnel": "^2.0.2",

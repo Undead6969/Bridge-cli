@@ -9,12 +9,22 @@ import {
   sessionSpecSchema,
   sessionStreamEventSchema,
   type AuthToken,
+  type GatewaysState,
   type InboxItem,
   type MachineRecord,
+  type MachineSetupRecord,
+  type OwnerRecord,
   type PowerPolicy,
+  type RuntimesState,
   type SessionRecord,
   type SessionSpec,
   type SessionStreamEvent
+} from "@bridge/protocol";
+import {
+  gatewaysStateSchema,
+  machineSetupRecordSchema,
+  ownerRecordSchema,
+  runtimesStateSchema
 } from "@bridge/protocol";
 import WebSocket from "ws";
 
@@ -77,6 +87,31 @@ export class BridgeSdk {
   async listMachines(): Promise<MachineRecord[]> {
     const response = await fetch(`${this.baseUrl}/machines`, { headers: this.headers() });
     return json(response, { parse: (value) => machineRecordSchema.array().parse(value) });
+  }
+
+  async getOwnerState(): Promise<{
+    owner: OwnerRecord | null;
+    machine: MachineSetupRecord | null;
+    runtimes: RuntimesState | null;
+    gateways: GatewaysState | null;
+  }> {
+    const response = await fetch(`${this.baseUrl}/owner/state`, { headers: this.headers() });
+    return json(response, {
+      parse: (value) => {
+        const payload = value as {
+          owner: unknown;
+          machine: unknown;
+          runtimes: unknown;
+          gateways: unknown;
+        };
+        return {
+          owner: payload.owner ? ownerRecordSchema.parse(payload.owner) : null,
+          machine: payload.machine ? machineSetupRecordSchema.parse(payload.machine) : null,
+          runtimes: payload.runtimes ? runtimesStateSchema.parse(payload.runtimes) : null,
+          gateways: payload.gateways ? gatewaysStateSchema.parse(payload.gateways) : null
+        };
+      }
+    });
   }
 
   async getMachine(machineId: string): Promise<MachineRecord> {

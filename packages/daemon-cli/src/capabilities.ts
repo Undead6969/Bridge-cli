@@ -1,7 +1,9 @@
 import { type CliCapability, type MachineCapabilities, type PowerCapability } from "@bridge/protocol";
 import { execFile } from "node:child_process";
-import { hostname } from "node:os";
+import { existsSync } from "node:fs";
+import { hostname, homedir } from "node:os";
 import os from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -52,20 +54,44 @@ async function detectCli(name: "codex" | "claude" | "gemini"): Promise<CliCapabi
     return {
       installed: false,
       launchable: false,
+      authState: "not-installed",
       supportsRemoteWrapper: false,
       supportsSessionControl: false
     };
   }
   const version = await resolveVersion(executablePath);
   const remote = supportsRemoteWrapper(name, version);
+  const authState = await detectAuthState(name);
   return {
     installed: true,
     executablePath,
     version,
     launchable: true,
+    authState,
     supportsRemoteWrapper: remote,
     supportsSessionControl: remote
   };
+}
+
+async function detectAuthState(name: "codex" | "claude" | "gemini"): Promise<CliCapability["authState"]> {
+  if (name === "codex") {
+    try {
+      const { stdout, stderr } = await execFileAsync("codex", ["login", "status"]);
+      const value = `${stdout}${stderr}`;
+      return /logged in/i.test(value) ? "authenticated" : "unauthenticated";
+    } catch {
+      return existsSync(join(homedir(), ".codex", "auth.json")) ? "authenticated" : "unauthenticated";
+    }
+  }
+  if (name === "gemini") {
+    return existsSync(join(homedir(), ".gemini", "oauth_creds.json")) ? "authenticated" : "unauthenticated";
+  }
+  const claudeCandidates = [
+    join(homedir(), ".claude", "auth.json"),
+    join(homedir(), ".config", "claude", "auth.json"),
+    join(homedir(), ".config", "claude-code", "auth.json")
+  ];
+  return claudeCandidates.some((pathname) => existsSync(pathname)) ? "authenticated" : "unknown";
 }
 
 export function detectPowerCapability(): PowerCapability {

@@ -1,6 +1,7 @@
 import { daemonCommandSchema, daemonEventSchema, type MachineCapabilities, type PowerPolicy, type SessionSpec } from "@bridge/protocol";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, resolve } from "node:path";
 import WebSocket from "ws";
 import type { SessionManager } from "./sessions.js";
@@ -109,15 +110,27 @@ export function createMachineId(): string {
   if (process.env.BRIDGE_MACHINE_ID) {
     return process.env.BRIDGE_MACHINE_ID;
   }
-  const machineIdFile = resolve(process.cwd(), ".bridge", "machine-id");
-  if (existsSync(machineIdFile)) {
-    const value = readFileSync(machineIdFile, "utf8").trim();
+  const globalMachineIdFile = resolve(homedir(), ".bridge", "machine-id");
+  const legacyMachineIdFile = resolve(process.cwd(), ".bridge", "machine-id");
+
+  if (existsSync(globalMachineIdFile)) {
+    const value = readFileSync(globalMachineIdFile, "utf8").trim();
     if (value) {
       return value;
     }
   }
+
+  if (existsSync(legacyMachineIdFile)) {
+    const value = readFileSync(legacyMachineIdFile, "utf8").trim();
+    if (value) {
+      mkdirSync(dirname(globalMachineIdFile), { recursive: true });
+      writeFileSync(globalMachineIdFile, `${value}\n`, "utf8");
+      return value;
+    }
+  }
+
   const value = `machine-${randomUUID()}`;
-  mkdirSync(dirname(machineIdFile), { recursive: true });
-  writeFileSync(machineIdFile, `${value}\n`, "utf8");
+  mkdirSync(dirname(globalMachineIdFile), { recursive: true });
+  writeFileSync(globalMachineIdFile, `${value}\n`, "utf8");
   return value;
 }

@@ -10,6 +10,7 @@ import {
 } from "@bridge/protocol";
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { readGatewaysState, readMachineSetupRecord, readOwnerRecord, readRuntimesState } from "./local-state.js";
 import { originAllowed } from "./origin.js";
 import { attachRealtime, sendSessionStart, sendSessionStop, type Connections } from "./realtime.js";
 import { BridgeStore } from "./store.js";
@@ -56,6 +57,13 @@ export function createApp(store = new BridgeStore()) {
   });
 
   app.get("/health", async () => ({ ok: true }));
+
+  app.get("/owner/state", async () => ({
+    owner: readOwnerRecord(),
+    machine: readMachineSetupRecord(),
+    runtimes: readRuntimesState(),
+    gateways: readGatewaysState()
+  }));
 
   app.post("/auth/pairings/request", async (request) => {
     const body = pairingRequestSchema.parse(request.body ?? {});
